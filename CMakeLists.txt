@@ -63,10 +63,7 @@ target_include_directories(range-solver-lib
 )
 
 target_link_libraries(range-solver-lib
-    PRIVATE
-        OpenMP::OpenMP_CXX
-        Qt6::Core
-        common_defines
-        range-base-lib
+    PUBLIC
         range-model-lib
+        common_defines
 )
