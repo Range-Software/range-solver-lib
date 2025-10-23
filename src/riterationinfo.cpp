@@ -154,7 +154,11 @@ void RIterationInfo::writeToFile(const QString &fileName, uint iteration, const 
 
     QFile file(fileName);
 
-    file.open(QIODevice::Append | QIODevice::Text);
+    if (!file.open(QIODevice::Append | QIODevice::Text))
+    {
+        RLogger::warning("Failed to open the file \'%s\' for writing.\n",fileName.toUtf8().constData());
+        return;
+    }
 
     QTextStream out(&file);
     out.setRealNumberNotation(QTextStream::ScientificNotation);

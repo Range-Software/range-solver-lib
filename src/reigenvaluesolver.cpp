@@ -313,7 +313,6 @@ void REigenValueSolver::solveRayleigh(const RSparseMatrix &M, const RSparseMatri
 
     double eps = this->eigenValueSolverConf.getSolverCvgValue();
     double mu = std::max(d[0], 1.0e9 * double(rand()) / double(RAND_MAX));
-    double muo = mu + 2 * eps;
     uint nIterations = this->eigenValueSolverConf.getNIterations();
 
     std::vector< std::vector<uint> > mIndexes;
@@ -337,7 +336,7 @@ void REigenValueSolver::solveRayleigh(const RSparseMatrix &M, const RSparseMatri
         RLogger::info("Rayleigh quotient iteration %u of %u\n",it+1,nIterations);
         RLogger::indent();
 
-        muo = mu;
+        double muo = mu;
 
         // Add K*mu to M
         for (uint i=0;i<n;i++)
