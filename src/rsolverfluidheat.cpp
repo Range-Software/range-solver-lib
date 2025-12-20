@@ -55,48 +55,15 @@ class FluidHeatMatrixContainer
         }
 };
 
-void RSolverFluidHeat::_init(const RSolverFluidHeat *pSolver)
-{
-    if (pSolver)
-    {
-        this->elementCapacity = pSolver->elementCapacity;
-        this->elementConduction = pSolver->elementConduction;
-        this->elementDensity = pSolver->elementDensity;
-        this->nodeTemperature = pSolver->nodeTemperature;
-        this->nodeHeat = pSolver->nodeHeat;
-        this->elementHeat = pSolver->elementHeat;
-        this->elementRadiativeHeat = pSolver->elementRadiativeHeat;
-        this->elementJouleHeat = pSolver->elementJouleHeat;
-        this->elementHeatFlux = pSolver->elementHeatFlux;
-        this->elementVelocity = pSolver->elementVelocity;
-        this->nodeVelocity = pSolver->nodeVelocity;
-        this->streamVelocity = pSolver->streamVelocity;
-    }
-}
-
 RSolverFluidHeat::RSolverFluidHeat(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
 {
     this->problemType = R_PROBLEM_FLUID_HEAT;
-    this->_init();
-}
-
-RSolverFluidHeat::RSolverFluidHeat(const RSolverFluidHeat &solver)
-    : RSolverGeneric(solver)
-{
-    this->_init(&solver);
 }
 
 RSolverFluidHeat::~RSolverFluidHeat()
 {
     this->clearShapeDerivatives();
-}
-
-RSolverFluidHeat &RSolverFluidHeat::operator =(const RSolverFluidHeat &solver)
-{
-    RSolverGeneric::operator =(solver);
-    this->_init(&solver);
-    return (*this);
 }
 
 bool RSolverFluidHeat::hasConverged(void) const

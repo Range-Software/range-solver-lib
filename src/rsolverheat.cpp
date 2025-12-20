@@ -2,43 +2,14 @@
 #include "rconvection.h"
 #include "rmatrixsolver.h"
 
-void RSolverHeat::_init(const RSolverHeat *pHeatSolver)
-{
-    if (pHeatSolver)
-    {
-        this->elementCapacity = pHeatSolver->elementCapacity;
-        this->elementConduction = pHeatSolver->elementConduction;
-        this->elementDensity = pHeatSolver->elementDensity;
-        this->nodeTemperature = pHeatSolver->nodeTemperature;
-        this->elementHeat = pHeatSolver->elementHeat;
-        this->elementRadiativeHeat = pHeatSolver->elementRadiativeHeat;
-        this->elementJouleHeat = pHeatSolver->elementJouleHeat;
-        this->elementHeatFlux = pHeatSolver->elementHeatFlux;
-    }
-}
-
 RSolverHeat::RSolverHeat(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
 {
     this->problemType = R_PROBLEM_HEAT;
-    this->_init();
-}
-
-RSolverHeat::RSolverHeat(const RSolverHeat &heatSolver)
-    : RSolverGeneric(heatSolver)
-{
-    this->_init(&heatSolver);
 }
 
 RSolverHeat::~RSolverHeat()
 {
-}
-
-RSolverHeat &RSolverHeat::operator =(const RSolverHeat &heatSolver)
-{
-    RSolverGeneric::operator =(heatSolver);
-    this->_init(&heatSolver);
-    return (*this);
 }
 
 bool RSolverHeat::hasConverged(void) const

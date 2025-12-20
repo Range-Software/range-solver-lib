@@ -28,24 +28,13 @@ class RSolverAcoustic : public RSolverGeneric
         //! Element acoustic pressure.
         RSolverCartesianVector<RRVector> elementAcousticParticleVelocity;
 
-    private:
-
-        //! Internal initialization function.
-        void _init(const RSolverAcoustic *pAcousticSolver = nullptr);
-
     public:
 
         //! Constructor.
         explicit RSolverAcoustic(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData);
 
-        //! Copy constructor.
-        RSolverAcoustic(const RSolverAcoustic &acousticSolver);
-
         //! Destructor.
         ~RSolverAcoustic();
-
-        //! Assignment operator.
-        RSolverAcoustic & operator =(const RSolverAcoustic &acousticSolver);
 
         //! Check if solver has converged.
         bool hasConverged(void) const;

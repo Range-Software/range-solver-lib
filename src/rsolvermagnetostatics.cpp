@@ -1,38 +1,15 @@
 #include "rsolvermagnetostatics.h"
 #include "rmatrixsolver.h"
 
-void RSolverMagnetostatics::_init(const RSolverMagnetostatics *pSolver)
-{
-    if (pSolver)
-    {
-        this->nodeCurrentDensity = pSolver->nodeCurrentDensity;
-        this->nodeMagneticField = pSolver->nodeMagneticField;
-    }
-}
-
 RSolverMagnetostatics::RSolverMagnetostatics(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
 {
     this->problemType = R_PROBLEM_MAGNETOSTATICS;
-    this->_init();
-}
-
-RSolverMagnetostatics::RSolverMagnetostatics(const RSolverMagnetostatics &solver)
-    : RSolverGeneric(solver)
-{
-    this->_init(&solver);
 }
 
 RSolverMagnetostatics::~RSolverMagnetostatics()
 {
 
-}
-
-RSolverMagnetostatics &RSolverMagnetostatics::operator =(const RSolverMagnetostatics &solver)
-{
-    RSolverGeneric::operator =(solver);
-    this->_init(&solver);
-    return (*this);
 }
 
 bool RSolverMagnetostatics::hasConverged(void) const

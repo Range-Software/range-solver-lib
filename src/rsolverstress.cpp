@@ -4,49 +4,15 @@
 #include "rmatrixsolver.h"
 #include "reigenvaluesolver.h"
 
-void RSolverStress::_init(const RSolverStress *pStressSolver)
-{
-    if (pStressSolver)
-    {
-        this->problemType = pStressSolver->problemType;
-        this->elementElasticityModulus = pStressSolver->elementElasticityModulus;
-        this->elementPoissonRatio = pStressSolver->elementPoissonRatio;
-        this->elementDensity = pStressSolver->elementDensity;
-        this->elementThermalExpansion = pStressSolver->elementThermalExpansion;
-        this->elementEnvironmentTemperature = pStressSolver->elementEnvironmentTemperature;
-        this->nodeDisplacement = pStressSolver->nodeDisplacement;
-        this->nodeInitialDisplacement = pStressSolver->nodeInitialDisplacement;
-        this->nodeForce = pStressSolver->nodeForce;
-        this->nodeAcceleration = pStressSolver->nodeAcceleration;
-        this->elementNormalStress = pStressSolver->elementNormalStress;
-        this->elementShearStress = pStressSolver->elementShearStress;
-        this->elementVonMisses = pStressSolver->elementVonMisses;
-    }
-}
-
 RSolverStress::RSolverStress(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData, bool modalAnalysis)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
 {
     this->problemType = modalAnalysis ? R_PROBLEM_STRESS_MODAL : R_PROBLEM_STRESS;
-    this->_init();
-}
-
-RSolverStress::RSolverStress(const RSolverStress &stressSolver)
-    : RSolverGeneric(stressSolver)
-{
-    this->_init(&stressSolver);
 }
 
 RSolverStress::~RSolverStress()
 {
 
-}
-
-RSolverStress &RSolverStress::operator =(const RSolverStress &stressSolver)
-{
-    RSolverGeneric::operator =(stressSolver);
-    this->_init(&stressSolver);
-    return (*this);
 }
 
 bool RSolverStress::hasConverged(void) const

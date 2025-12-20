@@ -13,24 +13,13 @@ class RSolverMagnetostatics : public RSolverGeneric
         //! Node current density.
         RSolverCartesianVector<RRVector> nodeMagneticField;
 
-    private:
-
-        //! Internal initialization function.
-        void _init(const RSolverMagnetostatics *pSolver = nullptr);
-
     public:
 
         //! Constructor.
         explicit RSolverMagnetostatics(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData);
 
-        //! Copy constructor.
-        RSolverMagnetostatics(const RSolverMagnetostatics &solver);
-
         //! Destructor.
         ~RSolverMagnetostatics();
-
-        //! Assignment operator.
-        RSolverMagnetostatics & operator =(const RSolverMagnetostatics &solver);
 
         //! Check if solver has converged.
         bool hasConverged(void) const;

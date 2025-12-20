@@ -54,24 +54,13 @@ class RSolverFluidHeat : public RSolverGeneric
         RStopWatch solverStopWatch;
         RStopWatch updateStopWatch;
 
-    private:
-
-        //! Internal initialization function.
-        void _init(const RSolverFluidHeat *pSolver = nullptr);
-
     public:
 
         //! Constructor.
         explicit RSolverFluidHeat(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData);
 
-        //! Copy constructor.
-        RSolverFluidHeat(const RSolverFluidHeat &solver);
-
         //! Destructor.
         ~RSolverFluidHeat();
-
-        //! Assignment operator.
-        RSolverFluidHeat &operator =(const RSolverFluidHeat &solver);
 
         //! Check if solver has converged.
         bool hasConverged(void) const;

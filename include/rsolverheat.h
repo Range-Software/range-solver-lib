@@ -27,24 +27,13 @@ class RSolverHeat : public RSolverGeneric
         //! Element heat flux vector.
         std::vector<RR3Vector> elementHeatFlux;
 
-    private:
-
-        //! Internal initialization function.
-        void _init(const RSolverHeat *pHeatSolver = nullptr);
-
     public:
 
         //! Constructor.
         explicit RSolverHeat(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData);
 
-        //! Copy constructor.
-        RSolverHeat(const RSolverHeat &heatSolver);
-
         //! Destructor.
         ~RSolverHeat();
-
-        //! Assignment operator.
-        RSolverHeat & operator =(const RSolverHeat &heatSolver);
 
         //! Check if solver has converged.
         bool hasConverged(void) const;

@@ -15,24 +15,13 @@ class RSolverWave : public RSolverGeneric
         //! Element node displacement.
         RRVector nodeWaveDisplacement;
 
-    private:
-
-        //! Internal initialization function.
-        void _init(const RSolverWave *pWaveSolver = nullptr);
-
     public:
 
         //! Constructor.
         explicit RSolverWave(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData);
 
-        //! Copy constructor.
-        RSolverWave(const RSolverWave &waveSolver);
-
         //! Destructor.
         ~RSolverWave();
-
-        //! Assignment operator.
-        RSolverWave & operator =(const RSolverWave &waveSolver);
 
         //! Check if solver has converged.
         bool hasConverged(void) const;

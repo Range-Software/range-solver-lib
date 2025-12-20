@@ -42,24 +42,13 @@ class RSolverStress : public RSolverGeneric
         //! Eigen vectors.
         RRMatrix ev;
 
-    private:
-
-        //! Internal initialization function.
-        void _init(const RSolverStress *pStressSolver = nullptr);
-
     public:
 
         //! Constructor.
         explicit RSolverStress(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData, bool modalAnalysis);
 
-        //! Copy constructor.
-        RSolverStress(const RSolverStress &stressSolver);
-
         //! Destructor.
         ~RSolverStress();
-
-        //! Assignment operator.
-        RSolverStress & operator =(const RSolverStress &stressSolver);
 
         //! Check if solver has converged.
         bool hasConverged(void) const;

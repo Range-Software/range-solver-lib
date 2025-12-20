@@ -24,24 +24,13 @@ class RSolverRadiativeHeat : public RSolverGeneric
         //! Old patch heat norm.
         double oldPatchHeatNorm;
 
-    private:
-
-        //! Internal initialization function.
-        void _init(const RSolverRadiativeHeat *pRadiativeHeatSolver = nullptr);
-
     public:
 
         //! Constructor.
         explicit RSolverRadiativeHeat(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData);
 
-        //! Copy constructor.
-        RSolverRadiativeHeat(const RSolverRadiativeHeat &radiativeHeatSolver);
-
         //! Destructor.
         ~RSolverRadiativeHeat();
-
-        //! Assignment operator.
-        RSolverRadiativeHeat &operator =(const RSolverRadiativeHeat &radiativeHeatSolver);
 
         //! Check if solver has converged.
         bool hasConverged(void) const;

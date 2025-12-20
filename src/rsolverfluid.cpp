@@ -3,7 +3,7 @@
 #include "rsolverfluid.h"
 #include "rmatrixsolver.h"
 
-//#define _OPTIMAL_ASSEMBLY_
+#define _OPTIMAL_ASSEMBLY_
 
 static const double inv6 = 1.0 / 6.0;
 
@@ -58,6 +58,12 @@ class FluidMatrixContainer
         RRVector be1;
         RRVector be2;
 
+        // Thread-local temporary vectors (avoid per-element allocation)
+        RRVector ax;
+        RRVector ay;
+        RRVector az;
+        RRVector vdiv;
+
     public:
 
         FluidMatrixContainer() : initialized(false)
@@ -109,6 +115,12 @@ class FluidMatrixContainer
             this->be1.resize(nen*3,0.0);
             this->be2.resize(nen,0.0);
 
+            // Thread-local temporary vectors
+            this->ax.resize(nen,0.0);
+            this->ay.resize(nen,0.0);
+            this->az.resize(nen,0.0);
+            this->vdiv.resize(nen,0.0);
+
             this->initialized = true;
         }
 
@@ -155,45 +167,14 @@ class FluidMatrixContainer
             this->Ae22.fill(0.0);
             this->be1.fill(0.0);
             this->be2.fill(0.0);
+
+            // Thread-local temporary vectors
+            this->ax.fill(0.0);
+            this->ay.fill(0.0);
+            this->az.fill(0.0);
+            this->vdiv.fill(0.0);
         }
 };
-
-void RSolverFluid::_init(const RSolverFluid *pSolver)
-{
-    if (pSolver)
-    {
-        this->freePressureNodeHeight = pSolver->freePressureNodeHeight;
-        this->elementScales = pSolver->elementScales;
-        this->elementPressure = pSolver->elementPressure;
-        this->elementVelocity = pSolver->elementVelocity;
-        this->elementGravity = pSolver->elementGravity;
-        this->nodePressure = pSolver->nodePressure;
-        this->nodeVelocity = pSolver->nodeVelocity;
-        this->nodeVelocityOld = pSolver->nodeVelocityOld;
-        this->nodeAcceleration = pSolver->nodeAcceleration;
-        this->streamVelocity = pSolver->streamVelocity;
-        this->invStreamVelocity = pSolver->invStreamVelocity;
-        this->elementDensity = pSolver->elementDensity;
-        this->elementViscosity = pSolver->elementViscosity;
-        this->avgRo = pSolver->avgRo;
-        this->avgU = pSolver->avgU;
-        this->cvgV = pSolver->cvgV;
-        this->cvgP = pSolver->cvgP;
-    }
-    else
-    {
-        this->nodeAcceleration.x.resize(this->pModel->getNNodes(),0.0);
-        this->nodeAcceleration.y.resize(this->pModel->getNNodes(),0.0);
-        this->nodeAcceleration.z.resize(this->pModel->getNNodes(),0.0);
-        this->nodeVelocity.x.resize(this->pModel->getNNodes(),0.0);
-        this->nodeVelocity.y.resize(this->pModel->getNNodes(),0.0);
-        this->nodeVelocity.z.resize(this->pModel->getNNodes(),0.0);
-        this->nodeVelocityOld.x.resize(this->pModel->getNNodes(),0.0);
-        this->nodeVelocityOld.y.resize(this->pModel->getNNodes(),0.0);
-        this->nodeVelocityOld.z.resize(this->pModel->getNNodes(),0.0);
-        this->nodePressure.resize(this->pModel->getNNodes(),0.0);
-    }
-}
 
 RSolverFluid::RSolverFluid(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
@@ -203,25 +184,21 @@ RSolverFluid::RSolverFluid(RModel *pModel, const QString &modelFileName, const Q
     , cvgP(0.0)
 {
     this->problemType = R_PROBLEM_FLUID;
-    this->_init();
-}
-
-RSolverFluid::RSolverFluid(const RSolverFluid &solver)
-    : RSolverGeneric(solver)
-{
-    this->_init(&solver);
+    this->nodeAcceleration.x.resize(this->pModel->getNNodes(),0.0);
+    this->nodeAcceleration.y.resize(this->pModel->getNNodes(),0.0);
+    this->nodeAcceleration.z.resize(this->pModel->getNNodes(),0.0);
+    this->nodeVelocity.x.resize(this->pModel->getNNodes(),0.0);
+    this->nodeVelocity.y.resize(this->pModel->getNNodes(),0.0);
+    this->nodeVelocity.z.resize(this->pModel->getNNodes(),0.0);
+    this->nodeVelocityOld.x.resize(this->pModel->getNNodes(),0.0);
+    this->nodeVelocityOld.y.resize(this->pModel->getNNodes(),0.0);
+    this->nodeVelocityOld.z.resize(this->pModel->getNNodes(),0.0);
+    this->nodePressure.resize(this->pModel->getNNodes(),0.0);
 }
 
 RSolverFluid::~RSolverFluid()
 {
     this->clearShapeDerivatives();
-}
-
-RSolverFluid &RSolverFluid::operator =(const RSolverFluid &solver)
-{
-    RSolverGeneric::operator =(solver);
-    this->_init(&solver);
-    return (*this);
 }
 
 bool RSolverFluid::hasConverged(void) const
@@ -521,11 +498,15 @@ void RSolverFluid::solve(void)
     this->updateStopWatch.reset();
     this->updateStopWatch.resume();
 
+    // Compute old velocity norm (parallelized reduction)
     double uOld = 0.0;
-    for (uint i=0;i<this->nodeVelocity.x.size();i++)
+    #pragma omp parallel for default(shared) reduction(+:uOld)
+    for (int64_t i=0;i<int64_t(this->nodeVelocity.x.size());i++)
     {
-        RR3Vector vec(this->nodeVelocity.x[i],this->nodeVelocity.y[i],this->nodeVelocity.z[i]);
-        uOld += RRVector::dot(vec,vec);
+        double vx = this->nodeVelocity.x[uint(i)];
+        double vy = this->nodeVelocity.y[uint(i)];
+        double vz = this->nodeVelocity.z[uint(i)];
+        uOld += vx*vx + vy*vy + vz*vz;
     }
     uOld = std::sqrt(uOld);
     double pOld = RRVector::euclideanNorm(this->nodePressure);
@@ -537,59 +518,69 @@ void RSolverFluid::solve(void)
         this->nodeVelocityOld.z = this->nodeVelocity.z;
     }
 
-    for (uint i=0;i<this->pModel->getNNodes();i++)
+    // Update node velocities and pressures (parallelized)
+    #pragma omp parallel for default(shared)
+    for (int64_t i=0;i<int64_t(this->pModel->getNNodes());i++)
     {
+        uint nodeIdx = uint(i);
         uint position = 0;
         double dvx = 0.0;
         double dvy = 0.0;
         double dvz = 0.0;
         double dp = 0.0;
 
-        if (this->nodeBook.getValue(4*i+0,position))
+        if (this->nodeBook.getValue(4*nodeIdx+0,position))
         {
             dvx = this->x[position];
         }
-        if (this->nodeBook.getValue(4*i+1,position))
+        if (this->nodeBook.getValue(4*nodeIdx+1,position))
         {
             dvy = this->x[position];
         }
-        if (this->nodeBook.getValue(4*i+2,position))
+        if (this->nodeBook.getValue(4*nodeIdx+2,position))
         {
             dvz = this->x[position];
         }
-        if (this->nodeBook.getValue(4*i+3,position))
+        if (this->nodeBook.getValue(4*nodeIdx+3,position))
         {
             dp = this->x[position];
         }
-        if (this->localRotations[i].isActive())
+        if (this->localRotations[nodeIdx].isActive())
         {
             RR3Vector v(dvx,dvy,dvz);
-            this->localRotations[i].rotateResultsVector(v);
+            this->localRotations[nodeIdx].rotateResultsVector(v);
             dvx = v[0];
             dvy = v[1];
             dvz = v[2];
         }
-        this->nodeVelocity.x[i] += dvx;
-        this->nodeVelocity.y[i] += dvy;
-        this->nodeVelocity.z[i] += dvz;
-        this->nodePressure[i] += dp;
+        this->nodeVelocity.x[nodeIdx] += dvx;
+        this->nodeVelocity.y[nodeIdx] += dvy;
+        this->nodeVelocity.z[nodeIdx] += dvz;
+        this->nodePressure[nodeIdx] += dp;
     }
     if (this->pModel->getTimeSolver().getEnabled())
     {
         double dt = this->pModel->getTimeSolver().getCurrentTimeStepSize();
-        for (uint i=0;i<this->pModel->getNNodes();i++)
+        double invDt = 1.0 / dt;
+        #pragma omp parallel for default(shared)
+        for (int64_t i=0;i<int64_t(this->pModel->getNNodes());i++)
         {
-            this->nodeAcceleration.x[i] = (this->nodeVelocity.x[i] - this->nodeVelocityOld.x[i]) / dt;
-            this->nodeAcceleration.y[i] = (this->nodeVelocity.y[i] - this->nodeVelocityOld.y[i]) / dt;
-            this->nodeAcceleration.z[i] = (this->nodeVelocity.z[i] - this->nodeVelocityOld.z[i]) / dt;
+            uint nodeIdx = uint(i);
+            this->nodeAcceleration.x[nodeIdx] = (this->nodeVelocity.x[nodeIdx] - this->nodeVelocityOld.x[nodeIdx]) * invDt;
+            this->nodeAcceleration.y[nodeIdx] = (this->nodeVelocity.y[nodeIdx] - this->nodeVelocityOld.y[nodeIdx]) * invDt;
+            this->nodeAcceleration.z[nodeIdx] = (this->nodeVelocity.z[nodeIdx] - this->nodeVelocityOld.z[nodeIdx]) * invDt;
         }
     }
 
+    // Compute new velocity norm (parallelized reduction)
     double u = 0.0;
-    for (uint i=0;i<this->nodeVelocity.x.size();i++)
+    #pragma omp parallel for default(shared) reduction(+:u)
+    for (int64_t i=0;i<int64_t(this->nodeVelocity.x.size());i++)
     {
-        RR3Vector vec(this->nodeVelocity.x[i],this->nodeVelocity.y[i],this->nodeVelocity.z[i]);
-        u += RRVector::dot(vec,vec);
+        double vx = this->nodeVelocity.x[uint(i)];
+        double vy = this->nodeVelocity.y[uint(i)];
+        double vz = this->nodeVelocity.z[uint(i)];
+        u += vx*vx + vy*vy + vz*vz;
     }
     u = std::sqrt(u);
     double p = RRVector::euclideanNorm(this->nodePressure);
@@ -713,10 +704,18 @@ void RSolverFluid::statistics(void)
     static uint counter = 0;
     static double oldResidual = 0.0;
 
-    double scale = std::pow(this->scales.getSecond(),2) / this->scales.getKilogram();
+    double secondScale = this->scales.getSecond();
+    double scale = (secondScale * secondScale) / this->scales.getKilogram();
     double residual = RRVector::euclideanNorm(this->b)*scale;
     double convergence = residual - oldResidual;
     oldResidual = residual;
+
+    // Validation checksums for optimization verification
+    double vxNorm = RRVector::euclideanNorm(this->nodeVelocity.x);
+    double vyNorm = RRVector::euclideanNorm(this->nodeVelocity.y);
+    double vzNorm = RRVector::euclideanNorm(this->nodeVelocity.z);
+    double pNorm = RRVector::euclideanNorm(this->nodePressure);
+    RLogger::info("VALIDATION: ||vx||=%.15e ||vy||=%.15e ||vz||=%.15e ||p||=%.15e\n", vxNorm, vyNorm, vzNorm, pNorm);
 
     std::vector<RIterationInfoValue> cvgValues;
     cvgValues.push_back(RIterationInfoValue("Solver residual",residual));
@@ -1238,11 +1237,13 @@ void RSolverFluid::computeFreePressureNodeHeight(void)
 
 void RSolverFluid::computeShapeDerivatives(void)
 {
-    this->shapeDerivations.resize(this->pModel->getNElements(),nullptr);
+    uint ne = this->pModel->getNElements();
+    this->shapeDerivations.resize(ne,nullptr);
 
-    for (uint i=0;i<this->pModel->getNElements();i++)
+    #pragma omp parallel for default(shared)
+    for (int64_t i=0;i<int64_t(ne);i++)
     {
-        uint elementID = i;
+        uint elementID = uint(i);
 
         const RElement &rElement = this->pModel->getElement(elementID);
 //        if (R_ELEMENT_TYPE_IS_VOLUME(rElement.getType()))
@@ -1360,9 +1361,10 @@ void RSolverFluid::computeElementGeneral(unsigned int elementID, RRMatrix &Ae, R
         veo[2] += this->nodeVelocityOld.z[element.getNodeId(i)];
     }
     veo *= 1.0/double(nen);
-    RRVector ax(nen,0.0);
-    RRVector ay(nen,0.0);
-    RRVector az(nen,0.0);
+    // Reuse thread-local vectors from matrixContainer
+    RRVector &ax = matrixCotainer.ax;
+    RRVector &ay = matrixCotainer.ay;
+    RRVector &az = matrixCotainer.az;
     for (uint i=0;i<nen;i++)
     {
         ax[i] = this->nodeAcceleration.x[element.getNodeId(i)];
@@ -1380,6 +1382,9 @@ void RSolverFluid::computeElementGeneral(unsigned int elementID, RRMatrix &Ae, R
     RR3Vector s(veo);
     s.normalize();
 
+    // Reuse thread-local vdiv vector
+    RRVector &vdiv = matrixCotainer.vdiv;
+
     for (uint intPoint=0;intPoint<nInp;intPoint++)
     {
         const RElementShapeFunction &shapeFunc = RElement::getShapeFunction(element.getType(),intPoint);
@@ -1390,7 +1395,7 @@ void RSolverFluid::computeElementGeneral(unsigned int elementID, RRMatrix &Ae, R
         double integValue = detJ * shapeFunc.getW();
 
         // velocity divergence
-        RRVector vdiv(nen,0.0);
+        vdiv.fill(0.0);
         // partial derivatives
         RR3Vector vex(0.0,0.0,0.0), vey(0.0,0.0,0.0), vez(0.0,0.0,0.0);
         double px = 0.0, py = 0.0, pz = 0.0;
@@ -1885,9 +1890,10 @@ void RSolverFluid::computeElementConstantDerivative(unsigned int elementID, RRMa
         veo[2] += this->nodeVelocityOld.z[element.getNodeId(i)];
     }
     veo *= 1.0/double(nen);
-    RRVector ax(nen,0.0);
-    RRVector ay(nen,0.0);
-    RRVector az(nen,0.0);
+    // Reuse thread-local vectors from matrixContainer
+    RRVector &ax = matrixCotainer.ax;
+    RRVector &ay = matrixCotainer.ay;
+    RRVector &az = matrixCotainer.az;
     for (uint i=0;i<nen;i++)
     {
         ax[i] = this->nodeAcceleration.x[element.getNodeId(i)];
@@ -1911,8 +1917,9 @@ void RSolverFluid::computeElementConstantDerivative(unsigned int elementID, RRMa
     double wt = RElement::getTotalWeightFactor(element.getType());
     const RRMatrix &B = this->shapeDerivations[elementID]->getDerivative(0);
 
-    // velocity divergence
-    RRVector vdiv(nen,0.0);
+    // Reuse thread-local vdiv vector
+    RRVector &vdiv = matrixCotainer.vdiv;
+    vdiv.fill(0.0);
     // partial derivatives
     RR3Vector vex(0.0,0.0,0.0), vey(0.0,0.0,0.0), vez(0.0,0.0,0.0);
     double px = 0.0, py = 0.0, pz = 0.0;

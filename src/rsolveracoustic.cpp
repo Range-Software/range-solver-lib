@@ -1,49 +1,17 @@
 #include "rsolveracoustic.h"
 #include "rmatrixsolver.h"
 
-void RSolverAcoustic::_init(const RSolverAcoustic *pAcousticSolver)
-{
-    if (pAcousticSolver)
-    {
-        this->elementElasticityModulus = pAcousticSolver->elementElasticityModulus;
-        this->elementDensity = pAcousticSolver->elementDensity;
-        this->elementDampingFactor = pAcousticSolver->elementDampingFactor;
-        this->nodeVelocityPotential = pAcousticSolver->nodeVelocityPotential;
-        this->nodeVelocityPotentialVelocity = pAcousticSolver->nodeVelocityPotentialVelocity;
-        this->nodeVelocityPotentialAcceleration = pAcousticSolver->nodeVelocityPotentialAcceleration;
-        this->nodeAcousticPressure = pAcousticSolver->nodeAcousticPressure;
-        this->elementAcousticParticleVelocity = pAcousticSolver->elementAcousticParticleVelocity;
-    }
-    else
-    {
-        this->nodeVelocityPotentialVelocity.resize(this->pModel->getNNodes(),0.0);
-        this->nodeVelocityPotentialAcceleration.resize(this->pModel->getNNodes(),0.0);
-    }
-}
-
 RSolverAcoustic::RSolverAcoustic(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
 {
     this->problemType = R_PROBLEM_ACOUSTICS;
-    this->_init();
-}
-
-RSolverAcoustic::RSolverAcoustic(const RSolverAcoustic &acousticSolver)
-    : RSolverGeneric(acousticSolver)
-{
-    this->_init(&acousticSolver);
+    this->nodeVelocityPotentialVelocity.resize(this->pModel->getNNodes(),0.0);
+    this->nodeVelocityPotentialAcceleration.resize(this->pModel->getNNodes(),0.0);
 }
 
 RSolverAcoustic::~RSolverAcoustic()
 {
 
-}
-
-RSolverAcoustic &RSolverAcoustic::operator =(const RSolverAcoustic &acousticSolver)
-{
-    RSolverGeneric::operator =(acousticSolver);
-    this->_init(&acousticSolver);
-    return (*this);
 }
 
 bool RSolverAcoustic::hasConverged(void) const

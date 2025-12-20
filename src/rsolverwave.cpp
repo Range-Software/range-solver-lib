@@ -1,38 +1,14 @@
 #include "rsolverwave.h"
 
-void RSolverWave::_init(const RSolverWave *pWaveSolver)
-{
-    if (pWaveSolver)
-    {
-        this->elementWaveSpeed = pWaveSolver->elementWaveSpeed;
-        this->elementWaveDisplacement = pWaveSolver->elementWaveDisplacement;
-        this->nodeWaveDisplacement = pWaveSolver->nodeWaveDisplacement;
-    }
-}
-
 RSolverWave::RSolverWave(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
 {
     this->problemType = R_PROBLEM_WAVE;
-    this->_init();
-}
-
-RSolverWave::RSolverWave(const RSolverWave &waveSolver)
-    : RSolverGeneric(waveSolver)
-{
-    this->_init(&waveSolver);
 }
 
 RSolverWave::~RSolverWave()
 {
 
-}
-
-RSolverWave &RSolverWave::operator =(const RSolverWave &waveSolver)
-{
-    RSolverGeneric::operator =(waveSolver);
-    this->_init(&waveSolver);
-    return (*this);
 }
 
 bool RSolverWave::hasConverged(void) const

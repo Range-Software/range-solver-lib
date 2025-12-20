@@ -1,5 +1,6 @@
 #include <QFile>
 #include <cstdio>
+#include <omp.h>
 
 #include <rbl_application_state.h>
 
@@ -10,27 +11,6 @@
 
 const double RSolverGeneric::sigma = 5.670367e-8; // Stefan-Boltzman constant [W/(m*m*K*K*K*K)]
 const double RSolverGeneric::e0 = 8.854187817e-12; // Vacuum permittivity [F/m]
-
-void RSolverGeneric::_init(const RSolverGeneric *pGenericSolver)
-{
-    if (pGenericSolver)
-    {
-        this->meshChanged = pGenericSolver->meshChanged;
-        this->problemType = pGenericSolver->problemType;
-        this->pModel = pGenericSolver->pModel;
-        this->M = pGenericSolver->M;
-        this->A = pGenericSolver->A;
-        this->x = pGenericSolver->x;
-        this->b = pGenericSolver->b;
-        this->nodeBook = pGenericSolver->nodeBook;
-        this->localRotations = pGenericSolver->localRotations;
-        this->elementTemperature = pGenericSolver->elementTemperature;
-        this->pSharedData = pGenericSolver->pSharedData;
-        this->firstRun = pGenericSolver->firstRun;
-        this->taskIteration = pGenericSolver->taskIteration;
-        this->computableElements = pGenericSolver->computableElements;
-    }
-}
 
 RSolverGeneric::RSolverGeneric(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : meshChanged(true)
@@ -46,23 +26,11 @@ RSolverGeneric::RSolverGeneric(RModel *pModel, const QString &modelFileName, con
     this->elementTemperature = this->pSharedData->findData("element-temperature");
     this->elementTemperature.resize(this->pModel->getNElements(),RVariable::getInitValue(R_VARIABLE_TEMPERATURE));
     this->localRotations.resize(this->pModel->getNNodes());
-    this->_init();
-}
-
-RSolverGeneric::RSolverGeneric(const RSolverGeneric &genericSolver)
-{
-    this->_init(&genericSolver);
 }
 
 RSolverGeneric::~RSolverGeneric()
 {
 
-}
-
-RSolverGeneric &RSolverGeneric::operator =(const RSolverGeneric &genericSolver)
-{
-    this->_init(&genericSolver);
-    return (*this);
 }
 
 void RSolverGeneric::run(bool firstRun, uint taskIteration)
@@ -227,9 +195,10 @@ RRVector RSolverGeneric::findElementSizes(void) const
 {
     uint ne = this->pModel->getNElements();
     RRVector elementSizes(ne,0.0);
-    for (uint i=0;i<ne;i++)
+    #pragma omp parallel for default(shared)
+    for (int64_t i=0;i<int64_t(ne);i++)
     {
-        elementSizes[i] = this->pModel->getElement(i).findSize(this->pModel->getNodes());
+        elementSizes[uint(i)] = this->pModel->getElement(uint(i)).findSize(this->pModel->getNodes());
     }
     return elementSizes;
 }

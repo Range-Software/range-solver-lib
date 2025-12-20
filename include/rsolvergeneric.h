@@ -73,24 +73,19 @@ class RSolverGeneric
         //! Surface element inward orientation (if normal is pointing inside computable volume element).
         RBVector inwardElements;
 
-    private:
-
-        //! Internal initialization function.
-        void _init(const RSolverGeneric *pGenericSolver = nullptr);
-
     public:
 
         //! Constructor.
         RSolverGeneric(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData);
 
-        //! Copy constructor.
-        RSolverGeneric(const RSolverGeneric &genericSolver);
+        //! Copy constructor (deleted - solvers should not be copied).
+        RSolverGeneric(const RSolverGeneric &genericSolver) = delete;
+
+        //! Assignment operator (deleted - solvers should not be copied).
+        RSolverGeneric & operator =(const RSolverGeneric &genericSolver) = delete;
 
         //! Destructor.
         virtual ~RSolverGeneric();
-
-        //! Assignment operator.
-        RSolverGeneric & operator =(const RSolverGeneric &genericSolver);
 
         //! Run solver.
         void run(bool firstRun, uint taskIteration);

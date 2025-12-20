@@ -27,21 +27,21 @@ class RSolver
     private:
 
         //! Internal initialization function.
-        void _init(const RSolver *pSolver = nullptr);
+        void _init();
 
     public:
 
         //! Constructor.
         RSolver(RModel &model, const QString &modelFileName, const QString &convergenceFileName);
 
-        //! Copy constructor.
-        RSolver(const RSolver &solver);
+        //! Copy constructor (deleted to prevent double-free of solvers).
+        RSolver(const RSolver &solver) = delete;
+
+        //! Assignment operator (deleted to prevent double-free of solvers).
+        RSolver & operator =(const RSolver &solver) = delete;
 
         //! Destructor.
         ~RSolver();
-
-        //! Assignment operator.
-        RSolver & operator =(const RSolver &solver);
 
         //! Run solver.
         void run(void);

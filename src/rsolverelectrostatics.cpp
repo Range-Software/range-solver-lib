@@ -1,44 +1,15 @@
 #include "rsolverelectrostatics.h"
 #include "rmatrixsolver.h"
 
-void RSolverElectrostatics::_init(const RSolverElectrostatics *pSolver)
-{
-    if (pSolver)
-    {
-        this->nodeElectricPotential = pSolver->nodeElectricPotential;
-        this->elementElectricField = pSolver->elementElectricField;
-        this->elementCurrentDensity = pSolver->elementCurrentDensity;
-        this->elementRelativePermittivity = pSolver->elementRelativePermittivity;
-        this->elementElectricConductivity = pSolver->elementElectricConductivity;
-        this->elementElectricEnergy = pSolver->elementElectricEnergy;
-        this->elementElectricResistivity = pSolver->elementElectricResistivity;
-        this->elementJouleHeat = pSolver->elementJouleHeat;
-    }
-}
-
 RSolverElectrostatics::RSolverElectrostatics(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
 {
     this->problemType = R_PROBLEM_ELECTROSTATICS;
-    this->_init();
-}
-
-RSolverElectrostatics::RSolverElectrostatics(const RSolverElectrostatics &solver)
-    : RSolverGeneric(solver)
-{
-    this->_init(&solver);
 }
 
 RSolverElectrostatics::~RSolverElectrostatics()
 {
 
-}
-
-RSolverElectrostatics &RSolverElectrostatics::operator =(const RSolverElectrostatics &solver)
-{
-    RSolverGeneric::operator =(solver);
-    this->_init(&solver);
-    return (*this);
 }
 
 bool RSolverElectrostatics::hasConverged(void) const

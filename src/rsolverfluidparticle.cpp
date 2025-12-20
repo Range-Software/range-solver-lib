@@ -55,48 +55,17 @@ class FluidParticleMatrixContainer
         }
 };
 
-void RSolverFluidParticle::_init(const RSolverFluidParticle *pSolver)
-{
-    if (pSolver)
-    {
-        this->elementConcentration = pSolver->elementConcentration;
-        this->elementRate = pSolver->elementRate;
-        this->elementVelocity = pSolver->elementVelocity;
-        this->streamVelocity = pSolver->streamVelocity;
-        this->nodeConcentration = pSolver->nodeConcentration;
-        this->nodeRate = pSolver->nodeRate;
-        this->nodeVelocity = pSolver->nodeVelocity;
-        this->elementDensity = pSolver->elementDensity;
-        this->elementDiffusion = pSolver->elementDiffusion;
-        this->cvgC = pSolver->cvgC;
-    }
-}
-
 RSolverFluidParticle::RSolverFluidParticle(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
     , streamVelocity(1.0)
     , cvgC(0.0)
 {
     this->problemType = R_PROBLEM_FLUID_PARTICLE;
-    this->_init();
-}
-
-RSolverFluidParticle::RSolverFluidParticle(const RSolverFluidParticle &solver)
-    : RSolverGeneric(solver)
-{
-    this->_init(&solver);
 }
 
 RSolverFluidParticle::~RSolverFluidParticle()
 {
     this->clearShapeDerivatives();
-}
-
-RSolverFluidParticle &RSolverFluidParticle::operator =(const RSolverFluidParticle &solver)
-{
-    RSolverGeneric::operator =(solver);
-    this->_init(&solver);
-    return (*this);
 }
 
 bool RSolverFluidParticle::hasConverged(void) const

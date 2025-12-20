@@ -11,24 +11,13 @@ class RSolverMesh : public RSolverGeneric
         //! Mesh input.
         RMeshInput meshInput;
 
-    private:
-
-        //! Internal initialization function.
-        void _init(const RSolverMesh *pSolver = nullptr);
-
     public:
 
         //! Constructor.
         explicit RSolverMesh(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData);
 
-        //! Copy constructor.
-        RSolverMesh(const RSolverMesh &solver);
-
         //! Destructor.
         ~RSolverMesh();
-
-        //! Assignment operator.
-        RSolverMesh & operator =(const RSolverMesh &solver);
 
         //! Check if solver has converged.
         bool hasConverged(void) const;

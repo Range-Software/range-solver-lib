@@ -2,44 +2,17 @@
 #include "rmatrixsolver.h"
 #include "rhemicube.h"
 
-void RSolverRadiativeHeat::_init(const RSolverRadiativeHeat *pRadiativeHeatSolver)
-{
-    if (pRadiativeHeatSolver)
-    {
-        this->elementTemperature = pRadiativeHeatSolver->elementTemperature;
-        this->elementRadiativeHeat = pRadiativeHeatSolver->elementRadiativeHeat;
-        this->patchHeat = pRadiativeHeatSolver->patchHeat;
-        this->viewFactorMatrix = pRadiativeHeatSolver->viewFactorMatrix;
-        this->patchHeatNorm = pRadiativeHeatSolver->patchHeatNorm;
-        this->oldPatchHeatNorm = pRadiativeHeatSolver->oldPatchHeatNorm;
-    }
-}
-
 RSolverRadiativeHeat::RSolverRadiativeHeat(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
     , patchHeatNorm(0.0)
     , oldPatchHeatNorm(0.0)
 {
     this->problemType = R_PROBLEM_RADIATIVE_HEAT;
-    this->_init();
-}
-
-RSolverRadiativeHeat::RSolverRadiativeHeat(const RSolverRadiativeHeat &radiativeHeatSolver)
-    : RSolverGeneric(radiativeHeatSolver)
-{
-    this->_init(&radiativeHeatSolver);
 }
 
 RSolverRadiativeHeat::~RSolverRadiativeHeat()
 {
 
-}
-
-RSolverRadiativeHeat &RSolverRadiativeHeat::operator =(const RSolverRadiativeHeat &radiativeHeatSolver)
-{
-    RSolverGeneric::operator =(radiativeHeatSolver);
-    this->_init(&radiativeHeatSolver);
-    return (*this);
 }
 
 bool RSolverRadiativeHeat::hasConverged(void) const

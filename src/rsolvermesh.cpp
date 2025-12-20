@@ -4,37 +4,15 @@
 
 #include "rsolvermesh.h"
 
-void RSolverMesh::_init(const RSolverMesh *pSolver)
-{
-    if (pSolver)
-    {
-
-    }
-}
-
 RSolverMesh::RSolverMesh(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
 {
     this->problemType = R_PROBLEM_MESH;
-    this->_init();
-}
-
-RSolverMesh::RSolverMesh(const RSolverMesh &solver)
-    : RSolverGeneric(solver)
-{
-    this->_init(&solver);
 }
 
 RSolverMesh::~RSolverMesh()
 {
 
-}
-
-RSolverMesh &RSolverMesh::operator =(const RSolverMesh &solver)
-{
-    RSolverGeneric::operator =(solver);
-    this->_init(&solver);
-    return (*this);
 }
 
 bool RSolverMesh::hasConverged() const

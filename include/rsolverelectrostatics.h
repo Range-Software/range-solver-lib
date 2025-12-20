@@ -25,24 +25,13 @@ class RSolverElectrostatics : public RSolverGeneric
         //! Element electric conductivity.
         RRVector elementElectricConductivity;
 
-    private:
-
-        //! Internal initialization function.
-        void _init(const RSolverElectrostatics *pSolver = nullptr);
-
     public:
 
         //! Constructor.
         explicit RSolverElectrostatics(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData);
 
-        //! Copy constructor.
-        RSolverElectrostatics(const RSolverElectrostatics &solver);
-
         //! Destructor.
         ~RSolverElectrostatics();
-
-        //! Assignment operator.
-        RSolverElectrostatics & operator =(const RSolverElectrostatics &solver);
 
         //! Check if solver has converged.
         bool hasConverged(void) const;
