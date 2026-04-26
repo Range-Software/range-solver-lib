@@ -17,6 +17,28 @@ Version 1.0.0
   getEnabled() || problemType==MODAL hoisted out of all inner loops.
 - RConvection::calculateGr(): pow(x, 2.0) and pow(x, 3.0) replaced with direct
   multiplication.
+- RSolverGeneric: node-book generation now batches disabled positions and
+  rebuilds the compacted book in one linear pass, avoiding repeated full-book
+  consolidation while applying boundary-condition constraints.
+- RSolverFluid: node-book generation uses the batched RSolverGeneric path, and
+  average stream-velocity calculation now uses direct multiplication plus an
+  OpenMP reduction instead of pow() and atomic accumulation.
+- RSolverFluidHeat and RSolverFluidParticle: matrix assembly now uses per-thread
+  sparse matrices/vectors and merges after the parallel element loop, removing
+  the OpenMP critical section around element assembly.
+- RSolverFluidHeat and RSolverFluidParticle: shape derivatives, node books, and
+  stream velocity are reused across iterations unless the mesh or first-iteration
+  state requires recomputation.
+- RSolverFluidHeat and RSolverFluidParticle: per-element velocity-divergence
+  temporaries are reused from matrix containers instead of being allocated in
+  every element integration path.
+- RMatrixSolver: CG and GMRES cache sparse row indexes and values once per solve,
+  avoiding repeated sparse-matrix lookups in matrix-vector products.
+- RMatrixSolver: CG updates/residual norms and GMRES Arnoldi orthogonalization
+  work are now parallelized more broadly, and hot-loop pow(x, 2) calls were
+  replaced with direct multiplication.
+- Public solver headers and implementations now use empty parameter lists `()`
+  instead of `(void)` for no-argument functions.
 
 Bug fixes:
 
@@ -47,3 +69,7 @@ Bug fixes:
 - RSolverFluid, RSolverFluidHeat, RSolverFluidParticle: static locals counter and
   oldResidual in statistics() were never reset between solver runs, corrupting
   convergence history output. Promoted to member variables.
+- RSolverFluidHeat: element heat accumulation now sizes node accumulation arrays
+  by node count instead of element count.
+- RSolverFluidParticle: particle-rate recovery now uses element count for
+  element-applied values instead of node count.
