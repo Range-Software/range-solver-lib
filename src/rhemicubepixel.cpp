@@ -37,12 +37,12 @@ RHemiCubePixel &RHemiCubePixel::operator =(const RHemiCubePixel &hemiCubePixel)
     return (*this);
 }
 
-const RR3Vector &RHemiCubePixel::getPosition(void) const
+const RR3Vector &RHemiCubePixel::getPosition() const
 {
     return this->position;
 }
 
-RR3Vector &RHemiCubePixel::getPosition(void)
+RR3Vector &RHemiCubePixel::getPosition()
 {
     return this->position;
 }
@@ -52,7 +52,7 @@ void RHemiCubePixel::setPosition(const RR3Vector &position)
     this->position = position;
 }
 
-uint RHemiCubePixel::getColor(void) const
+uint RHemiCubePixel::getColor() const
 {
     return this->color;
 }
@@ -62,7 +62,7 @@ void RHemiCubePixel::setColor(uint color)
     this->color = color;
 }
 
-double RHemiCubePixel::getDepth(void) const
+double RHemiCubePixel::getDepth() const
 {
     return this->depth;
 }
@@ -72,7 +72,7 @@ void RHemiCubePixel::setDepth(double depth)
     this->depth = depth;
 }
 
-double RHemiCubePixel::getWeight(void) const
+double RHemiCubePixel::getWeight() const
 {
     return this->weight;
 }

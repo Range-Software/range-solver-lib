@@ -149,21 +149,21 @@ void RConvection::setFluidTemp(double Tf)
     this->Tf = Tf;
 }
 
-double RConvection::calculateGr(void) const
+double RConvection::calculateGr() const
 {
     if (this->mu == 0.0)
     {
         return 0.0;
     }
-    return std::abs(pow(this->ro,2.0) * this->g * this->b * (this->Ts - this->Tf) * pow(this->d,3.0) / pow(this->mu,2.0));
+    return std::abs(this->ro*this->ro * this->g * this->b * (this->Ts - this->Tf) * this->d*this->d*this->d / (this->mu*this->mu));
 }
 
-double RConvection::calculateRa(void) const
+double RConvection::calculateRa() const
 {
     return this->calculateGr() * this->calculatePr();
 }
 
-double RConvection::calculateRe(void) const
+double RConvection::calculateRe() const
 {
     if (this->mu == 0.0)
     {
@@ -172,7 +172,7 @@ double RConvection::calculateRe(void) const
     return this->ro * this->v * this->d / this->mu;
 }
 
-double RConvection::calculatePr(void) const
+double RConvection::calculatePr() const
 {
     if (this->k == 0.0)
     {
@@ -181,7 +181,7 @@ double RConvection::calculatePr(void) const
     return this->c * this->mu / this->k;
 }
 
-double RConvection::calculateNu(void) const
+double RConvection::calculateNu() const
 {
     double Nu = 0.0;
     double Ra = 0.0;
@@ -225,41 +225,40 @@ double RConvection::calculateNu(void) const
             }
             else
             {
-                Nu = pow (0.825 + (0.387*pow(Ra,1.0/6.0))/pow(1.0 + pow(0.492/Pr, 9.0/16.0),8.0/27.0), 2.0);
+                double t = 0.825 + (0.387*pow(Ra,1.0/6.0))/pow(1.0 + pow(0.492/Pr, 9.0/16.0),8.0/27.0);
+                Nu = t * t;
             }
             break;
         case R_CONVECTION_NATURAL_EXTERNAL_HORIZONTAL_PLATES:
-            if (Ra < 1.0e5)
+            // Upper hot plate / lower cold plate (Churchill & Chu):
+            //   Ra < 2e7  → Nu = 0.54 * Ra^(1/4)
+            //   Ra >= 2e7 → Nu = 0.14 * Ra^(1/3)
+            // Lower hot plate / upper cold plate:
+            //   3e5 <= Ra < 3e10 → Nu = 0.27 * Ra^(1/4)
+            if (Ra < 2.0e7)
             {
-                /* Not really correct */
                 Nu = 0.54*pow(Ra,1.0/4.0);
             }
-            else if (1.0e5 <= Ra && Ra < 2.0e7)
-            {
-                Nu = 0.54*pow(Ra,1.0/4.0);
-            }
-            else if (2.0e7 <= Ra && Ra < 3.0e10)
+            else if (Ra < 3.0e10)
             {
                 Nu = 0.14*pow(Ra,1.0/3.0);
             }
-            else if (3.0e5 <= Ra && Ra < 1.0e10)
-            {
-                Nu = 0.27*pow(Ra,1.0/3.0);
-            }
             else
             {
-                /* Not really correct */
-                Nu = 0.27*pow(Ra,1.0/3.0);
+                Nu = 0.27*pow(Ra,1.0/4.0);
             }
             break;
         case R_CONVECTION_NATURAL_EXTERNAL_HORIZONTAL_CYLINDER:
-            Nu = pow (0.6 + (0.387*pow(Ra,1.0/6.0))/pow(1.0 + pow(0.559/Pr, 9.0/16.0),8.0/27.0), 2.0);
+        {
+            double t = 0.6 + (0.387*pow(Ra,1.0/6.0))/pow(1.0 + pow(0.559/Pr, 9.0/16.0),8.0/27.0);
+            Nu = t * t;
             break;
+        }
         case R_CONVECTION_NATURAL_EXTERNAL_SPHERES:
             Nu = 2.0 + 0.43*pow(Ra,1.0/4.0);
             break;
         case R_CONVECTION_FORCED_INTERNAL_LAMINAR:
-            Nu = 1.86 / pow(Re*Pr,2.0/3.0);
+            Nu = 1.86 * pow(Re*Pr, 1.0/3.0);
             break;
         case R_CONVECTION_FORCED_INTERNAL_TURBULENT:
             Nu = 0.023 * pow(Re,0.8) * pow(Pr,0.4);
@@ -275,7 +274,7 @@ double RConvection::calculateNu(void) const
     return Nu;
 }
 
-double RConvection::calculateHtc(void) const
+double RConvection::calculateHtc() const
 {
     if (this->d == 0.0)
     {

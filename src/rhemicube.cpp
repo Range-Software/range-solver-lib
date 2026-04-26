@@ -15,9 +15,9 @@ class RHemicubeTriangle
 
         RHemicubeTriangle(const RTriangle &triangle, uint color) : triangle(triangle), color(color) {}
 
-        const RTriangle &getTriangle(void) const { return this->triangle; }
+        const RTriangle &getTriangle() const { return this->triangle; }
 
-        uint getColor(void) const { return this->color; }
+        uint getColor() const { return this->color; }
 };
 
 class RHemicubeTriangleComp
@@ -30,15 +30,23 @@ class RHemicubeTriangleComp
 
         RHemicubeTriangleComp(const RR3Vector &eye) : eye(eye) {}
 
+        static double squaredDist(const RR3Vector &eye, const RNode &node)
+        {
+            double dx = node.getX() - eye[0];
+            double dy = node.getY() - eye[1];
+            double dz = node.getZ() - eye[2];
+            return dx*dx + dy*dy + dz*dz;
+        }
+
         bool operator() (const RHemicubeTriangle &t1,const RHemicubeTriangle &t2)
         {
-            double d1 = RSegment::findLength(RNode(this->eye),t1.getTriangle().getNode1());
-            d1 = std::min(d1,RSegment::findLength(RNode(this->eye),t1.getTriangle().getNode2()));
-            d1 = std::min(d1,RSegment::findLength(RNode(this->eye),t1.getTriangle().getNode3()));
+            double d1 = squaredDist(this->eye, t1.getTriangle().getNode1());
+            d1 = std::min(d1, squaredDist(this->eye, t1.getTriangle().getNode2()));
+            d1 = std::min(d1, squaredDist(this->eye, t1.getTriangle().getNode3()));
 
-            double d2 = RSegment::findLength(RNode(this->eye),t2.getTriangle().getNode1());
-            d2 = std::min(d2,RSegment::findLength(RNode(this->eye),t2.getTriangle().getNode2()));
-            d2 = std::min(d2,RSegment::findLength(RNode(this->eye),t2.getTriangle().getNode3()));
+            double d2 = squaredDist(this->eye, t2.getTriangle().getNode1());
+            d2 = std::min(d2, squaredDist(this->eye, t2.getTriangle().getNode2()));
+            d2 = std::min(d2, squaredDist(this->eye, t2.getTriangle().getNode3()));
 
             return (d1 < d2);
         }
@@ -92,7 +100,7 @@ void RHemiCube::rayTraceTriangle(const RTriangle &triangle, uint color)
     }
 }
 
-std::map<uint, double> RHemiCube::getViewFactors(void) const
+std::map<uint, double> RHemiCube::getViewFactors() const
 {
 
     std::map<uint, double> viewFactors;
@@ -121,7 +129,7 @@ std::map<uint, double> RHemiCube::getViewFactors(void) const
     return viewFactors;
 }
 
-double RHemiCube::getFillRatio(void) const
+double RHemiCube::getFillRatio() const
 {
     uint totalSize = 0;
     uint totalFill = 0;
@@ -154,6 +162,21 @@ void RHemiCube::calculateViewFactors(const RModel &model, RViewFactorMatrix &rVi
 
     RLogger::info("Calculating view-factors.\n");
     RLogger::indent();
+
+    // Pre-compute element triangulations once — reused by every eye-patch iteration.
+    std::vector<QList<RTriangle>> elementTriangles(model.getNElements());
+    for (uint patchID=0;patchID<rPatchBook.getNPatches();patchID++)
+    {
+        const RUVector &rElementIDs = rPatchBook.getPatch(patchID).getElementIDs();
+        for (uint j=0;j<rElementIDs.size();j++)
+        {
+            uint eid = rElementIDs[j];
+            if (elementTriangles[eid].isEmpty())
+            {
+                elementTriangles[eid] = model.getElement(eid).triangulate(model.getNodes());
+            }
+        }
+    }
 
     uint nPatchesProcessed = 0;
 
@@ -196,9 +219,8 @@ void RHemiCube::calculateViewFactors(const RModel &model, RViewFactorMatrix &rVi
                 const RUVector &rElementIDs = rPatchBook.getPatch(patchID).getElementIDs();
                 for (uint j=0;j<rElementIDs.size();j++)
                 {
-                    const RElement &rElement = model.getElement(rElementIDs[j]);
-                    QList<RTriangle> triangles = rElement.triangulate(model.getNodes());
-                    for (uint k=0;k<triangles.size();k++)
+                    const QList<RTriangle> &triangles = elementTriangles[rElementIDs[j]];
+                    for (uint k=0;k<uint(triangles.size());k++)
                     {
                         hemiCubeTriangles.push_back(RHemicubeTriangle(triangles[k],patchID));
                     }

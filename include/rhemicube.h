@@ -40,10 +40,10 @@ class RHemiCube
 
         //! Return view factors.
         //! Function returns map of color to view-factor value (color = 0 => empty).
-        std::map<uint,double> getViewFactors(void) const;
+        std::map<uint,double> getViewFactors() const;
 
         //! Return fill ratio.
-        double getFillRatio(void) const;
+        double getFillRatio() const;
 
         //! Calculate view factors.
         static void calculateViewFactors(const RModel &model, RViewFactorMatrix &rViewFactorMatrix);

@@ -5,6 +5,7 @@ void RHemiCubeSector::_init(const RHemiCubeSector *pHemiCubeSector)
     if (pHemiCubeSector)
     {
         this->limitPolygon = pHemiCubeSector->limitPolygon;
+        this->limitBox = pHemiCubeSector->limitBox;
         this->resolution = pHemiCubeSector->resolution;
         this->eyePosition = pHemiCubeSector->eyePosition;
         this->eyeDirection = pHemiCubeSector->eyeDirection;
@@ -26,6 +27,7 @@ RHemiCubeSector::RHemiCubeSector(const RR3Vector &eyePosition,
     this->pixels.resize(sectorSize);
     this->generate(resolution,iSubIndex,jSubIndex,nSubIndexes,size,type);
     this->limitPolygon = this->findLimitPolygon();
+    this->limitBox = this->findLimitBox();
 }
 
 RHemiCubeSector::RHemiCubeSector(const RHemiCubeSector &hemiCubeSector)
@@ -43,7 +45,7 @@ RHemiCubeSector &RHemiCubeSector::operator =(const RHemiCubeSector &hemiCubeSect
     return (*this);
 }
 
-uint RHemiCubeSector::getSize(void) const
+uint RHemiCubeSector::getSize() const
 {
     return uint(this->pixels.size());
 }
@@ -82,7 +84,7 @@ void RHemiCubeSector::rayTraceTriangle(const RTriangle &triangle, uint color)
         for (uint j=0;j<this->resolution;j++)
         {
             uint pixelId = i * this->resolution + j;
-            if (this->pixels[pixelId].getColor() != RConstants::eod && this->pixels[i].getDepth() < shortestDistance)
+            if (this->pixels[pixelId].getColor() != RConstants::eod && this->pixels[pixelId].getDepth() < shortestDistance)
             {
                 continue;
             }
@@ -219,7 +221,7 @@ bool RHemiCubeSector::testVisibility(const RTriangle &triangle) const
     RLimitBox triangleLimitBox(xl,xu,yl,yu,zl,zu);
     triangleLimitBox.scale(1.0 + RConstants::eps);
 
-    return RLimitBox::areIntersecting(this->findLimitBox(),triangleLimitBox);
+    return RLimitBox::areIntersecting(this->limitBox,triangleLimitBox);
 }
 
 void RHemiCubeSector::generate(uint resolution, uint iSubIndex, uint jSubIndex, uint nSubIndexes, double size, RHemiCubeSectorType type)
@@ -326,7 +328,7 @@ void RHemiCubeSector::generate(uint resolution, uint iSubIndex, uint jSubIndex, 
     }
 }
 
-std::vector<RR3Vector> RHemiCubeSector::findLimitPolygon(void) const
+std::vector<RR3Vector> RHemiCubeSector::findLimitPolygon() const
 {
     std::vector<RR3Vector> polygon;
 
@@ -338,7 +340,7 @@ std::vector<RR3Vector> RHemiCubeSector::findLimitPolygon(void) const
     return polygon;
 }
 
-RLimitBox RHemiCubeSector::findLimitBox(void) const
+RLimitBox RHemiCubeSector::findLimitBox() const
 {
     double xl = 0.0, yl = 0.0, zl = 0.0;
     double xu = 0.0, yu = 0.0, zu = 0.0;

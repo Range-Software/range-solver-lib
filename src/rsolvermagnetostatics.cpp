@@ -12,17 +12,17 @@ RSolverMagnetostatics::~RSolverMagnetostatics()
 
 }
 
-bool RSolverMagnetostatics::hasConverged(void) const
+bool RSolverMagnetostatics::hasConverged() const
 {
     return true;
 }
 
-void RSolverMagnetostatics::updateScales(void)
+void RSolverMagnetostatics::updateScales()
 {
 
 }
 
-void RSolverMagnetostatics::recover(void)
+void RSolverMagnetostatics::recover()
 {
     RRVector elementCurrentDensityX(this->pModel->getNElements(),0.0);
     RRVector elementCurrentDensityY(this->pModel->getNElements(),0.0);
@@ -37,7 +37,7 @@ void RSolverMagnetostatics::recover(void)
     this->pModel->convertElementToNodeVector(elementCurrentDensityZ,RBVector(this->pModel->getNElements(),true),this->nodeCurrentDensity.z,false);
 }
 
-void RSolverMagnetostatics::prepare(void)
+void RSolverMagnetostatics::prepare()
 {
     this->generateNodeBook(R_PROBLEM_MAGNETOSTATICS);
 
@@ -140,7 +140,7 @@ void RSolverMagnetostatics::prepare(void)
     }
 }
 
-void RSolverMagnetostatics::solve(void)
+void RSolverMagnetostatics::solve()
 {
     try
     {
@@ -171,12 +171,12 @@ void RSolverMagnetostatics::solve(void)
     }
 }
 
-void RSolverMagnetostatics::process(void)
+void RSolverMagnetostatics::process()
 {
 
 }
 
-void RSolverMagnetostatics::store(void)
+void RSolverMagnetostatics::store()
 {
     RLogger::info("Storing results\n");
     RLogger::indent();
@@ -221,7 +221,7 @@ void RSolverMagnetostatics::store(void)
     RLogger::unindent();
 }
 
-void RSolverMagnetostatics::statistics(void)
+void RSolverMagnetostatics::statistics()
 {
     this->printStats(R_VARIABLE_MAGNETIC_FIELD);
     this->processMonitoringPoints();

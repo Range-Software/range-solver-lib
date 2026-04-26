@@ -15,7 +15,7 @@ RSolverRadiativeHeat::~RSolverRadiativeHeat()
 
 }
 
-bool RSolverRadiativeHeat::hasConverged(void) const
+bool RSolverRadiativeHeat::hasConverged() const
 {
     if (this->oldPatchHeatNorm < RConstants::eps)
     {
@@ -28,18 +28,18 @@ bool RSolverRadiativeHeat::hasConverged(void) const
     return (convergenceRate < RConstants::eps);
 }
 
-double RSolverRadiativeHeat::findTemperatureScale(void) const
+double RSolverRadiativeHeat::findTemperatureScale() const
 {
     return 1.0;
 }
 
-void RSolverRadiativeHeat::updateScales(void)
+void RSolverRadiativeHeat::updateScales()
 {
     this->scales.setMetre(this->findMeshScale());
     this->scales.setKelvin(this->findTemperatureScale());
 }
 
-void RSolverRadiativeHeat::recover(void)
+void RSolverRadiativeHeat::recover()
 {
     uint heatRadiationVariablePosition = this->pModel->findVariable(R_VARIABLE_HEAT_RADIATION);
 
@@ -53,7 +53,7 @@ void RSolverRadiativeHeat::recover(void)
     }
 }
 
-void RSolverRadiativeHeat::prepareViewFactors(void)
+void RSolverRadiativeHeat::prepareViewFactors()
 {
     if (this->checkViewFactorHeader(this->viewFactorMatrix.getHeader()))
     {
@@ -131,7 +131,7 @@ void RSolverRadiativeHeat::prepareViewFactors(void)
     }
 }
 
-void RSolverRadiativeHeat::prepare(void)
+void RSolverRadiativeHeat::prepare()
 {
     RBVector temperatureExplicitFlags;
     RRVector elementAmbientTemperature;
@@ -191,13 +191,20 @@ void RSolverRadiativeHeat::prepare(void)
     }
 
     // Prepare patch elements.
+    // viewFactors is allocated once per thread outside the j-loop (PERF-3).
+    // b[i] is accumulated locally; only A.addValue needs a critical section since
+    // RSparseMatrix row-insertion may not be thread-safe across rows (PERF-12).
+    // Each outer iteration owns a unique i so b[i] writes are race-free (BUG-6/7).
+    uint nPatches = rPatchBook.getNPatches();
     #pragma omp parallel for default(shared)
-    for (int64_t i=0;i<int64_t(rPatchBook.getNPatches());i++)
+    for (int64_t i=0;i<int64_t(nPatches);i++)
     {
-        RRVector viewFactors = this->viewFactorMatrix.getRow(i).getViewFactors().getValues(rPatchBook.getNPatches());
+        RRVector viewFactors(nPatches);
+        viewFactors = this->viewFactorMatrix.getRow(i).getViewFactors().getValues(nPatches);
 
         double Fsum = 0.0;
-        for (uint j=0;j<rPatchBook.getNPatches();j++)
+        double bi = 0.0;
+        for (uint j=0;j<nPatches;j++)
         {
             double dij = (i == j ? 1.0 : 0.0);
 
@@ -212,21 +219,23 @@ void RSolverRadiativeHeat::prepare(void)
             }
             double Bij = (dij-Fij)*RSolverGeneric::sigma;
 
+            bi -= Bij * std::pow(patchTemperature[j],4);
+
             #pragma omp critical
             {
                 this->A.addValue(i,j,Aij);
-                this->b[j] -= Bij * std::pow(patchTemperature[j],4);
             }
         }
 
         // Ambient radiative heat flux
-        this->b[i] += (1.0 - Fsum) * RSolverGeneric::sigma * std::pow(patchAmbientTemperature[i],4);
+        bi += (1.0 - Fsum) * RSolverGeneric::sigma * std::pow(patchAmbientTemperature[i],4);
+        this->b[i] += bi;
         // Subtract resulting heat from convection-conduction equation to ensure energy balance
 //        this->b[i] -= this->patchHeat[i];
     }
 }
 
-void RSolverRadiativeHeat::solve(void)
+void RSolverRadiativeHeat::solve()
 {
     try
     {
@@ -251,7 +260,7 @@ void RSolverRadiativeHeat::solve(void)
     this->patchHeatNorm = RRVector::euclideanNorm(this->patchHeat);
 }
 
-void RSolverRadiativeHeat::process(void)
+void RSolverRadiativeHeat::process()
 {
     const RPatchBook &rPatchBook = this->viewFactorMatrix.getPatchBook();
 
@@ -282,7 +291,7 @@ void RSolverRadiativeHeat::process(void)
     }
 }
 
-void RSolverRadiativeHeat::store(void)
+void RSolverRadiativeHeat::store()
 {
     RLogger::info("Storing results\n");
     RLogger::indent();
@@ -308,7 +317,7 @@ void RSolverRadiativeHeat::store(void)
     RLogger::unindent();
 }
 
-void RSolverRadiativeHeat::statistics(void)
+void RSolverRadiativeHeat::statistics()
 {
     this->printStats(R_VARIABLE_HEAT_RADIATION);
     this->processMonitoringPoints();

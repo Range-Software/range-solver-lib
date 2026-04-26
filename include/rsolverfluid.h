@@ -69,54 +69,58 @@ class RSolverFluid : public RSolverGeneric
         RStopWatch solverStopWatch;
         RStopWatch updateStopWatch;
 
+        //! Statistics state (replaces function-local statics).
+        uint statsCounter;
+        double statsOldResidual;
+
     public:
 
         //! Constructor.
         explicit RSolverFluid(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData);
 
         //! Destructor.
-        ~RSolverFluid();
+        ~RSolverFluid() override;
 
         //! Check if solver has converged.
-        bool hasConverged(void) const;
+        bool hasConverged() const override;
 
     protected:
 
         //! Update scales.
-        void updateScales(void);
+        void updateScales() override;
 
         //! Recover previously computed results.
-        void recover(void);
+        void recover() override;
 
         //! Prepare solver.
-        void prepare(void);
+        void prepare() override;
 
         //! Run matrix solver.
-        void solve(void);
+        void solve() override;
 
         //! Process solver results.
-        void process(void);
+        void process() override;
 
         //! Store solver results.
-        void store(void);
+        void store() override;
 
         //! Process statistics.
-        void statistics(void);
+        void statistics() override;
 
         //! Find input vectors.
-        void findInputVectors(void);
+        void findInputVectors();
 
         //! Generate node book.
-        void generateNodeBook(void);
+        void generateNodeBook();
 
         //! Compute free pressure node height.
-        void computeFreePressureNodeHeight(void);
+        void computeFreePressureNodeHeight();
 
         //! Compute element shape derivatives.
-        void computeShapeDerivatives(void);
+        void computeShapeDerivatives();
 
         //! Clear element shape derivatives.
-        void clearShapeDerivatives(void);
+        void clearShapeDerivatives();
 
         //! Compute element matrix.
         void computeElement(unsigned int elementID, RRMatrix &Ae, RRVector &be, RMatrixManager<FluidMatrixContainer> &matrixManager);
@@ -128,16 +132,16 @@ class RSolverFluid : public RSolverGeneric
         void computeElementConstantDerivative(unsigned int elementID, RRMatrix &Ae, RRVector &be, RMatrixManager<FluidMatrixContainer> &matrixManager);
 
         //! Find time scale.
-        double findTimeScale(void) const;
+        double findTimeScale() const;
 
         //! Find Re scale.
-        double findReScale(void) const;
+        double findReScale() const;
 
         //! Find weight scale.
-        double findWeightScale(void) const;
+        double findWeightScale() const;
 
         //! Compute element scales.
-        void computeElementScales(void);
+        void computeElementScales();
 
         //! Find element free pressure.
         void computeElementFreePressure(RRVector &values, RBVector &setValues);

@@ -124,7 +124,7 @@ class FluidMatrixContainer
             this->initialized = true;
         }
 
-        void clear(void)
+        void clear()
         {
             this->me.fill(0.0);
             this->ce.fill(0.0);
@@ -182,6 +182,8 @@ RSolverFluid::RSolverFluid(RModel *pModel, const QString &modelFileName, const Q
     , invStreamVelocity(1.0)
     , cvgV(0.0)
     , cvgP(0.0)
+    , statsCounter(0)
+    , statsOldResidual(0.0)
 {
     this->problemType = R_PROBLEM_FLUID;
     this->nodeAcceleration.x.resize(this->pModel->getNNodes(),0.0);
@@ -201,12 +203,12 @@ RSolverFluid::~RSolverFluid()
     this->clearShapeDerivatives();
 }
 
-bool RSolverFluid::hasConverged(void) const
+bool RSolverFluid::hasConverged() const
 {
     return false;
 }
 
-void RSolverFluid::updateScales(void)
+void RSolverFluid::updateScales()
 {
     this->nodeVelocity.x.resize(this->pModel->getNNodes(),0.0);
     this->nodeVelocity.y.resize(this->pModel->getNNodes(),0.0);
@@ -256,7 +258,7 @@ void RSolverFluid::updateScales(void)
     this->scales.setKilogram(this->findWeightScale());
 }
 
-void RSolverFluid::recover(void)
+void RSolverFluid::recover()
 {
     this->recoveryStopWatch.reset();
     this->recoveryStopWatch.resume();
@@ -272,7 +274,7 @@ void RSolverFluid::recover(void)
     this->recoveryStopWatch.pause();
 }
 
-void RSolverFluid::prepare(void)
+void RSolverFluid::prepare()
 {
     RLogger::info("Building matrix system\n");
     RLogger::indent();
@@ -464,7 +466,7 @@ void RSolverFluid::prepare(void)
     RLogger::unindent();
 }
 
-void RSolverFluid::solve(void)
+void RSolverFluid::solve()
 {
     RLogger::info("Solving matrix system\n");
     RLogger::indent();
@@ -593,12 +595,12 @@ void RSolverFluid::solve(void)
     RLogger::unindent();
 }
 
-void RSolverFluid::process(void)
+void RSolverFluid::process()
 {
 
 }
 
-void RSolverFluid::store(void)
+void RSolverFluid::store()
 {
     RLogger::info("Storing results\n");
     RLogger::indent();
@@ -699,16 +701,13 @@ void RSolverFluid::store(void)
     RLogger::unindent();
 }
 
-void RSolverFluid::statistics(void)
+void RSolverFluid::statistics()
 {
-    static uint counter = 0;
-    static double oldResidual = 0.0;
-
     double secondScale = this->scales.getSecond();
     double scale = (secondScale * secondScale) / this->scales.getKilogram();
     double residual = RRVector::euclideanNorm(this->b)*scale;
-    double convergence = residual - oldResidual;
-    oldResidual = residual;
+    double convergence = residual - this->statsOldResidual;
+    this->statsOldResidual = residual;
 
     // Validation checksums for optimization verification
     double vxNorm = RRVector::euclideanNorm(this->nodeVelocity.x);
@@ -723,7 +722,7 @@ void RSolverFluid::statistics(void)
     cvgValues.push_back(RIterationInfoValue("Velocity convergence",this->cvgV));
     cvgValues.push_back(RIterationInfoValue("Pressure convergence",this->cvgP));
 
-    RIterationInfo::writeToFile(this->convergenceFileName,counter,cvgValues);
+    RIterationInfo::writeToFile(this->convergenceFileName,this->statsCounter,cvgValues);
 
     this->printStats(R_VARIABLE_VELOCITY);
     this->printStats(R_VARIABLE_PRESSURE);
@@ -738,10 +737,10 @@ void RSolverFluid::statistics(void)
     RLogger::info("Solver time:       %9u [ms]\n",this->solverStopWatch.getMiliSeconds());
     RLogger::info("Update time:       %9u [ms]\n",this->updateStopWatch.getMiliSeconds());
 
-    counter++;
+    this->statsCounter++;
 }
 
-void RSolverFluid::findInputVectors(void)
+void RSolverFluid::findInputVectors()
 {
     RBVector elementVelocitySetValues(this->pModel->getNElements(),false);
     RBVector elementPressureSetValues(this->pModel->getNElements(),false);
@@ -1054,10 +1053,11 @@ void RSolverFluid::findInputVectors(void)
     this->nodeAcceleration.z.resize(this->pModel->getNNodes(),0.0);
 }
 
-void RSolverFluid::generateNodeBook(void)
+void RSolverFluid::generateNodeBook()
 {
     this->nodeBook.resize(this->pModel->getNNodes()*4);
     this->nodeBook.initialize();
+    RBVector disabledPositions(this->nodeBook.size(),false);
 
     for (uint i=0;i<this->pModel->getNElementGroups();i++)
     {
@@ -1133,19 +1133,19 @@ void RSolverFluid::generateNodeBook(void)
                 uint nodeId = rElement.getNodeId(k);
                 if (elementHasVelocityX)
                 {
-                    this->nodeBook.disable(4*nodeId+0,true);
+                    disabledPositions[4*nodeId+0] = true;
                 }
                 if (elementHasVelocityY)
                 {
-                    this->nodeBook.disable(4*nodeId+1,true);
+                    disabledPositions[4*nodeId+1] = true;
                 }
                 if (elementHasVelocityZ)
                 {
-                    this->nodeBook.disable(4*nodeId+2,true);
+                    disabledPositions[4*nodeId+2] = true;
                 }
                 if (hasPressure)
                 {
-                    this->nodeBook.disable(4*nodeId+3,true);
+                    disabledPositions[4*nodeId+3] = true;
                 }
             }
         }
@@ -1166,15 +1166,17 @@ void RSolverFluid::generateNodeBook(void)
     {
         if (!computableNodes[i])
         {
-            this->nodeBook.disable(4*i+0,true);
-            this->nodeBook.disable(4*i+1,true);
-            this->nodeBook.disable(4*i+2,true);
-            this->nodeBook.disable(4*i+3,true);
+            disabledPositions[4*i+0] = true;
+            disabledPositions[4*i+1] = true;
+            disabledPositions[4*i+2] = true;
+            disabledPositions[4*i+3] = true;
         }
     }
+
+    RSolverGeneric::rebuildNodeBook(this->nodeBook,disabledPositions);
 }
 
-void RSolverFluid::computeFreePressureNodeHeight(void)
+void RSolverFluid::computeFreePressureNodeHeight()
 {
     this->freePressureNodeHeight.resize(this->pModel->getNNodes());
     this->freePressureNodeHeight.fill(0.0);
@@ -1235,7 +1237,7 @@ void RSolverFluid::computeFreePressureNodeHeight(void)
     }
 }
 
-void RSolverFluid::computeShapeDerivatives(void)
+void RSolverFluid::computeShapeDerivatives()
 {
     uint ne = this->pModel->getNElements();
     this->shapeDerivations.resize(ne,nullptr);
@@ -1260,7 +1262,7 @@ void RSolverFluid::computeShapeDerivatives(void)
     }
 }
 
-void RSolverFluid::clearShapeDerivatives(void)
+void RSolverFluid::clearShapeDerivatives()
 {
     for (uint i=0;i<this->shapeDerivations.size();i++)
     {
@@ -2349,7 +2351,7 @@ double RSolverFluid::findTimeScale() const
     return v/l;
 }
 
-double RSolverFluid::findReScale(void) const
+double RSolverFluid::findReScale() const
 {
     double v = RSolverFluid::computeStreamVelocity(*this->pModel,this->nodeVelocity,true);
     double l = 1.0 / this->scales.getMetre();
@@ -2359,7 +2361,7 @@ double RSolverFluid::findReScale(void) const
     return (Re == 0.0) ? 1.0 : 1.0e-2 / Re;
 }
 
-double RSolverFluid::findWeightScale(void) const
+double RSolverFluid::findWeightScale() const
 {
     double v = RSolverFluid::computeStreamVelocity(*this->pModel,this->nodeVelocity,true);
     double l = 1.0 / this->scales.getMetre();
@@ -2373,7 +2375,7 @@ double RSolverFluid::findWeightScale(void) const
     return ws;
 }
 
-void RSolverFluid::computeElementScales(void)
+void RSolverFluid::computeElementScales()
 {
     this->elementScales.resize(this->pModel->getNElements());
     this->elementScales.fill(0.0);
@@ -2558,18 +2560,13 @@ double RSolverFluid::computeStreamVelocity(const RModel &rModel, const RSolverCa
 
     if (averageBased)
     {
-#pragma omp parallel default(shared)
+#pragma omp parallel for default(shared) reduction(+:velocity)
+        for (int64_t i=0;i<int64_t(rModel.getNNodes());i++)
         {
-        double vm_local = 0.0;
-#pragma omp for
-            for (int64_t i=0;i<rModel.getNNodes();i++)
-            {
-                vm_local += std::sqrt(  std::pow(nodeVelocity.x[uint(i)],2)
-                                      + std::pow(nodeVelocity.y[uint(i)],2)
-                                      + std::pow(nodeVelocity.z[uint(i)],2));
-            }
-#pragma omp atomic
-            velocity += vm_local;
+            double vx = nodeVelocity.x[uint(i)];
+            double vy = nodeVelocity.y[uint(i)];
+            double vz = nodeVelocity.z[uint(i)];
+            velocity += std::sqrt(vx*vx + vy*vy + vz*vz);
         }
         if (rModel.getNNodes())
         {

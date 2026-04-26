@@ -36,10 +36,10 @@ class RIterationInfoValue
         RIterationInfoValue & operator =(const RIterationInfoValue &iterationInfoValue);
 
         //! Return name.
-        const QString &getName(void) const;
+        const QString &getName() const;
 
         //! Return value.
-        double getValue(void) const;
+        double getValue() const;
 
 };
 

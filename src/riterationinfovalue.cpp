@@ -39,12 +39,12 @@ RIterationInfoValue &RIterationInfoValue::operator =(const RIterationInfoValue &
     return (*this);
 }
 
-const QString &RIterationInfoValue::getName(void) const
+const QString &RIterationInfoValue::getName() const
 {
     return this->name;
 }
 
-double RIterationInfoValue::getValue(void) const
+double RIterationInfoValue::getValue() const
 {
     return this->value;
 }

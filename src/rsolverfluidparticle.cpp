@@ -20,6 +20,7 @@ class FluidParticleMatrixContainer
 
         // Element level vectors
         RRVector fv;    // f
+        RRVector vdiv;
 
     public:
 
@@ -38,11 +39,12 @@ class FluidParticleMatrixContainer
             this->yte.resize(nen,nen,0.0);
 
             this->fv.resize(nen,0.0);
+            this->vdiv.resize(nen,0.0);
 
             this->initialized = true;
         }
 
-        void clear(void)
+        void clear()
         {
             this->me.fill(0.0);
             this->ce.fill(0.0);
@@ -52,6 +54,7 @@ class FluidParticleMatrixContainer
             this->yte.fill(0.0);
 
             this->fv.fill(0.0);
+            this->vdiv.fill(0.0);
         }
 };
 
@@ -59,6 +62,8 @@ RSolverFluidParticle::RSolverFluidParticle(RModel *pModel, const QString &modelF
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
     , streamVelocity(1.0)
     , cvgC(0.0)
+    , statsCounter(0)
+    , statsOldResidual(0.0)
 {
     this->problemType = R_PROBLEM_FLUID_PARTICLE;
 }
@@ -68,12 +73,12 @@ RSolverFluidParticle::~RSolverFluidParticle()
     this->clearShapeDerivatives();
 }
 
-bool RSolverFluidParticle::hasConverged(void) const
+bool RSolverFluidParticle::hasConverged() const
 {
     return true;
 }
 
-void RSolverFluidParticle::generateNodeRateVector(void)
+void RSolverFluidParticle::generateNodeRateVector()
 {
     RBVector rateSetValues;
     this->generateVariableVector(R_VARIABLE_PARTICLE_RATE,this->elementRate,rateSetValues,true,this->firstRun,this->firstRun);
@@ -82,12 +87,12 @@ void RSolverFluidParticle::generateNodeRateVector(void)
     this->pModel->convertElementToNodeVector(this->elementRate,rateSetValues,this->nodeRate,true);
 }
 
-void RSolverFluidParticle::updateScales(void)
+void RSolverFluidParticle::updateScales()
 {
 
 }
 
-void RSolverFluidParticle::recover(void)
+void RSolverFluidParticle::recover()
 {
     this->recoveryStopWatch.reset();
     this->recoveryStopWatch.resume();
@@ -99,7 +104,7 @@ void RSolverFluidParticle::recover(void)
                           0.0);
     this->recoverVariable(R_VARIABLE_PARTICLE_RATE,
                           R_VARIABLE_APPLY_ELEMENT,
-                          this->pModel->getNNodes(),
+                          this->pModel->getNElements(),
                           0,
                           this->elementRate,
                           0.0);
@@ -109,7 +114,7 @@ void RSolverFluidParticle::recover(void)
     this->recoveryStopWatch.pause();
 }
 
-void RSolverFluidParticle::prepare(void)
+void RSolverFluidParticle::prepare()
 {
     RLogger::info("Building matrix system\n");
     RLogger::indent();
@@ -119,7 +124,10 @@ void RSolverFluidParticle::prepare(void)
 
     RBVector concentrationSetValues;
 
-    this->generateNodeBook(R_PROBLEM_FLUID_PARTICLE);
+    if (this->taskIteration == 0 || this->meshChanged)
+    {
+        this->generateNodeBook(R_PROBLEM_FLUID_PARTICLE);
+    }
 
     this->generateVariableVector(R_VARIABLE_PARTICLE_CONCENTRATION,this->elementConcentration,concentrationSetValues,true,this->firstRun,this->firstRun);
     this->generateMaterialVecor(RMaterialProperty::Density,this->elementDensity);
@@ -134,20 +142,46 @@ void RSolverFluidParticle::prepare(void)
     this->pModel->convertNodeToElementVector(this->nodeVelocity.y,this->elementVelocity.y);
     this->pModel->convertNodeToElementVector(this->nodeVelocity.z,this->elementVelocity.z);
 
-    this->computeShapeDerivatives();
-    this->streamVelocity = RSolverFluid::computeStreamVelocity(*this->pModel,this->nodeVelocity,false);
+    if (this->meshChanged)
+    {
+        this->clearShapeDerivatives();
+        this->computeShapeDerivatives();
+    }
+    if (this->taskIteration == 0)
+    {
+        this->streamVelocity = RSolverFluid::computeStreamVelocity(*this->pModel,this->nodeVelocity,false);
+    }
 
-    this->b.resize(this->nodeBook.getNEnabled());
-    this->x.resize(this->nodeBook.getNEnabled());
+    uint nEnabled = this->nodeBook.getNEnabled();
 
     this->A.clear();
-    this->A.setNRows(this->nodeBook.getNEnabled());
+    this->A.setNRows(nEnabled);
+    this->A.reserveNColumns(30);
+    this->b.resize(nEnabled);
+    this->x.resize(nEnabled);
     this->b.fill(0.0);
     this->x.fill(0.0);
+
+    int np = omp_get_max_threads();
+
+    QVector<RSparseMatrix> Ap;
+    Ap.resize(np);
+    QVector<RRVector> bp;
+    bp.resize(np);
+
+    for (int i=0;i<np;i++)
+    {
+        Ap[i].setNRows(nEnabled);
+        Ap[i].reserveNColumns(30);
+        bp[i].resize(nEnabled);
+        bp[i].fill(0.0);
+    }
 
     bool abort = false;
 
     RMatrixManager<FluidParticleMatrixContainer> matrixManager;
+
+    this->buildStopWatch.resume();
 
     // Compute element matrices
     #pragma omp parallel for default(shared) private(matrixManager)
@@ -169,27 +203,15 @@ void RSolverFluidParticle::prepare(void)
             RRMatrix Ae(nen,nen,0.0);
             RRVector be(nen,0.0);
 
-            RStopWatch localStopWatch;
-            localStopWatch.reset();
-
             if (R_ELEMENT_TYPE_IS_VOLUME(element.getType()))
             {
                 if (!this->computableElements[elementID])
                 {
                     continue;
                 }
-                localStopWatch.resume();
                 this->computeElement(elementID,Ae,be,matrixManager);
-                localStopWatch.pause();
             }
-            #pragma omp critical
-            {
-                this->buildStopWatch.addElapsedTime(localStopWatch.getMiliSeconds());
-
-                this->assemblyStopWatch.resume();
-                this->assemblyMatrix(elementID,Ae,be);
-                this->assemblyStopWatch.pause();
-            }
+            this->assemblyMatrix(elementID,Ae,be,Ap[omp_get_thread_num()],bp[omp_get_thread_num()]);
         }
         catch (const RError &rError)
         {
@@ -202,6 +224,21 @@ void RSolverFluidParticle::prepare(void)
         }
     }
 
+    this->buildStopWatch.pause();
+    this->assemblyStopWatch.resume();
+
+#pragma omp parallel for default(shared)
+    for (int64_t i=0;i<int64_t(this->A.getNRows());i++)
+    {
+        for (int j=0;j<np;j++)
+        {
+            this->A.getVector(uint(i)).addVector(Ap[j].getVector(uint(i)));
+            this->b[uint(i)] += bp[j][uint(i)];
+        }
+    }
+
+    this->assemblyStopWatch.pause();
+
     if (abort)
     {
         RLogger::unindent();
@@ -211,7 +248,7 @@ void RSolverFluidParticle::prepare(void)
     RLogger::unindent();
 }
 
-void RSolverFluidParticle::solve(void)
+void RSolverFluidParticle::solve()
 {
     RLogger::info("Solving matrix system\n");
     RLogger::indent();
@@ -259,12 +296,12 @@ void RSolverFluidParticle::solve(void)
     RLogger::unindent();
 }
 
-void RSolverFluidParticle::process(void)
+void RSolverFluidParticle::process()
 {
 
 }
 
-void RSolverFluidParticle::store(void)
+void RSolverFluidParticle::store()
 {
     RLogger::info("Storing results\n");
     RLogger::indent();
@@ -291,22 +328,19 @@ void RSolverFluidParticle::store(void)
     RLogger::unindent();
 }
 
-void RSolverFluidParticle::statistics(void)
+void RSolverFluidParticle::statistics()
 {
-    static uint counter = 0;
-    static double oldResidual = 0.0;
-
     double scale = std::pow(this->scales.getSecond(),2) / this->scales.getKilogram();
     double residual = RRVector::euclideanNorm(this->b)*scale;
-    double convergence = residual - oldResidual;
-    oldResidual = residual;
+    double convergence = residual - this->statsOldResidual;
+    this->statsOldResidual = residual;
 
     std::vector<RIterationInfoValue> cvgValues;
     cvgValues.push_back(RIterationInfoValue("Solver residual",residual));
     cvgValues.push_back(RIterationInfoValue("Solver convergence",convergence));
     cvgValues.push_back(RIterationInfoValue("Concentration convergence",this->cvgC));
 
-    RIterationInfo::writeToFile(this->convergenceFileName,counter,cvgValues);
+    RIterationInfo::writeToFile(this->convergenceFileName,this->statsCounter,cvgValues);
 
     this->printStats(R_VARIABLE_PARTICLE_CONCENTRATION);
     this->processMonitoringPoints();
@@ -318,7 +352,7 @@ void RSolverFluidParticle::statistics(void)
     RLogger::info("Solver time:   %9u [ms]\n",this->solverStopWatch.getMiliSeconds());
     RLogger::info("Update time:   %9u [ms]\n",this->updateStopWatch.getMiliSeconds());
 
-    counter++;
+    this->statsCounter++;
 }
 
 void RSolverFluidParticle::computeShapeDerivatives()
@@ -350,6 +384,7 @@ void RSolverFluidParticle::clearShapeDerivatives()
     {
         delete this->shapeDerivations[i];
     }
+    this->shapeDerivations.clear();
 }
 
 void RSolverFluidParticle::computeElement(unsigned int elementID, RRMatrix &Ae, RRVector &be, RMatrixManager<FluidParticleMatrixContainer> &matrixManager)
@@ -418,7 +453,8 @@ void RSolverFluidParticle::computeElementGeneral(unsigned int elementID, RRMatri
         double integValue = detJ * shapeFunc.getW();
 
         // velocity divergence
-        RRVector vdiv(nen,0.0);
+        RRVector &vdiv = matrixCotainer.vdiv;
+        vdiv.fill(0.0);
         // element length scale
         double h = 0.0;
 
@@ -558,7 +594,8 @@ void RSolverFluidParticle::computeElementConstantDerivative(unsigned int element
     const RRMatrix &B = this->shapeDerivations[elementID]->getDerivative(0);
 
     // velocity divergence
-    RRVector vdiv(nen,0.0);
+    RRVector &vdiv = matrixCotainer.vdiv;
+    vdiv.fill(0.0);
     // element length scale
     double h = 0.0;
 
@@ -678,6 +715,49 @@ void RSolverFluidParticle::assemblyMatrix(unsigned int elementID, const RRMatrix
                 if (this->nodeBook.getValue(rElement.getNodeId(n),np))
                 {
                     this->A.addValue(mp,np,Ae[m][n]);
+                }
+            }
+        }
+    }
+}
+
+void RSolverFluidParticle::assemblyMatrix(unsigned int elementID, const RRMatrix &Ae, const RRVector &be, RSparseMatrix &Ap, RRVector &bp)
+{
+    const RElement &rElement = this->pModel->getElement(elementID);
+    RRVector fe(be);
+
+    // Apply explicit boundary conditions.
+    for (uint m=0;m<rElement.size();m++)
+    {
+        uint mp = 0;
+        uint nodeID = rElement.getNodeId(m);
+        if (!this->nodeBook.getValue(nodeID,mp))
+        {
+            for (uint n=0;n<rElement.size();n++)
+            {
+                fe[n] -= Ae[n][m] * this->nodeConcentration[nodeID];
+            }
+        }
+    }
+
+    // Assembly final matrix system
+    for (uint m=0;m<rElement.size();m++)
+    {
+        uint mp = 0;
+        uint nodeIDm = rElement.getNodeId(m);
+
+        if (this->nodeBook.getValue(nodeIDm,mp))
+        {
+            bp[mp] += fe[m];
+
+            for (uint n=0;n<rElement.size();n++)
+            {
+                uint np = 0;
+                uint nodeIDn = rElement.getNodeId(n);
+
+                if (this->nodeBook.getValue(nodeIDn,np))
+                {
+                    Ap.addValue(mp,np,Ae[m][n]);
                 }
             }
         }

@@ -54,51 +54,55 @@ class RSolverFluidHeat : public RSolverGeneric
         RStopWatch solverStopWatch;
         RStopWatch updateStopWatch;
 
+        //! Statistics state (replaces function-local statics).
+        uint statsCounter;
+        double statsOldResidual;
+
     public:
 
         //! Constructor.
         explicit RSolverFluidHeat(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData);
 
         //! Destructor.
-        ~RSolverFluidHeat();
+        ~RSolverFluidHeat() override;
 
         //! Check if solver has converged.
-        bool hasConverged(void) const;
+        bool hasConverged() const override;
 
     protected:
 
         //! Find temperature scale.
-        double findTemperatureScale(void) const;
+        double findTemperatureScale() const;
 
         //! Generate node heat input vector.
-        void generateNodeHeatVector(void);
+        void generateNodeHeatVector();
 
         //! Update scales.
-        void updateScales(void);
+        void updateScales() override;
 
         //! Recover previously computed results.
-        void recover(void);
+        void recover() override;
 
         //! Prepare solver.
-        void prepare(void);
+        void prepare() override;
 
         //! Run matrix solver.
-        void solve(void);
+        void solve() override;
 
         //! Process solver results.
-        void process(void);
+        void process() override;
 
         //! Store solver results.
-        void store(void);
+        void store() override;
 
         //! Process statistics.
-        void statistics(void);
+        void statistics() override;
 
         //! Compute element shape derivatives.
-        void computeShapeDerivatives(void);
+        void computeShapeDerivatives();
 
         //! Clear element shape derivatives.
-        void clearShapeDerivatives(void);
+        void clearShapeDerivatives();
 
         //! Compute element matrix.
         void computeElement(unsigned int elementID, RRMatrix &Ae, RRVector &be, RMatrixManager<FluidHeatMatrixContainer> &matrixManager);
@@ -111,6 +115,9 @@ class RSolverFluidHeat : public RSolverGeneric
 
         //! Assembly matrix.
         void assemblyMatrix(unsigned int elementID, const RRMatrix &Ae, const RRVector &be);
+
+        //! Assembly matrix.
+        void assemblyMatrix(unsigned int elementID, const RRMatrix &Ae, const RRVector &be, RSparseMatrix &Ap, RRVector &bp);
 
 };
 

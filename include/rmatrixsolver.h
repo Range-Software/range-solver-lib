@@ -39,7 +39,7 @@ class RMatrixSolver
         void solve(const RSparseMatrix &A, const RRVector &b, RRVector &x, RMatrixPreconditionerType matrixPreconditionerType = R_MATRIX_PRECONDITIONER_NONE, unsigned int blockSize = 1);
 
         //! Disable convergence log file.
-        void disableConvergenceLogFile(void);
+        void disableConvergenceLogFile();
 
     protected:
 

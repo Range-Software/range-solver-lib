@@ -1,0 +1,49 @@
+---------------------------------------------------------------------------------
+Version 1.0.0
+
+- RHemiCubeSector: limitBox (bounding box of the limit polygon) is now cached at
+  construction time instead of being recomputed on every testVisibility() call.
+- RHemiCube::calculateViewFactors(): element triangulations are pre-computed once
+  before the parallel eye-patch loop instead of being recomputed for every
+  (eye-patch, element) pair.
+- RHemiCubeTriangleComp: sort comparator now uses squared distances, eliminating
+  all sqrt calls from the O(N log N) triangle sort.
+- RSolverRadiativeHeat::prepare(): per-thread b[i] is now accumulated in a local
+  variable and the omp critical section covers only A.addValue, removing the
+  serialisation of the entire inner j-loop.
+- RSolverHeat::prepare(): getTimeSolver().getEnabled() hoisted out of the
+  innermost integration-point loop into a single const bool.
+- RSolverStress::prepare(), process(): the compound condition
+  getEnabled() || problemType==MODAL hoisted out of all inner loops.
+- RConvection::calculateGr(): pow(x, 2.0) and pow(x, 3.0) replaced with direct
+  multiplication.
+
+Bug fixes:
+
+- RConvection::getFluidTemp() was returning surface temperature (Ts) instead of
+  fluid temperature (Tf).
+- RConvection::calculateNu(): laminar internal forced convection Nusselt number
+  was dividing by (Re*Pr)^(2/3) instead of multiplying by (Re*Pr)^(1/3).
+- RConvection::calculateNu(): unreachable branch in the horizontal-plates case
+  corrected; Ra ranges now cover all cases without overlap or gap.
+- RHemiCubeSector::rayTraceTriangle(): depth-skip guard was testing pixel row i
+  instead of the current pixel (pixelId), causing incorrect occlusion decisions.
+- REigenValueSolver::qlDecomposition(): inner Givens rotation loop incremented i
+  instead of decrementing it, producing an infinite loop or out-of-bounds access.
+  Loop variable changed to signed int to handle the l=0 boundary safely.
+- REigenValueSolver::solveRayleigh(): initial shift mu was computed from an
+  uninitialised vector element; replaced with a bounded random value.
+- R_EIS_PYTHAG macro: arguments were not parenthesised, causing wrong results
+  when expressions with lower precedence than * were passed.
+- RSolverRadiativeHeat::prepare(): RHS vector was assembled into b[j] (receiving
+  patch) instead of b[i] (emitting patch), producing a wrong system. The write to
+  b[i] for the ambient term was also outside the critical section, causing a data
+  race under OpenMP.
+- RSolverGeneric::run(): static local updateScalesDone persisted for the process
+  lifetime, preventing updateScales() from being called on subsequent solves.
+  Replaced with the existing firstRun member.
+- RSolverWave::prepare(): static local firstTime was never reset, so initial
+  conditions were skipped on every run after the first. Replaced with firstRun.
+- RSolverFluid, RSolverFluidHeat, RSolverFluidParticle: static locals counter and
+  oldResidual in statistics() were never reset between solver runs, corrupting
+  convergence history output. Promoted to member variables.

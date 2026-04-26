@@ -12,17 +12,17 @@ RSolverElectrostatics::~RSolverElectrostatics()
 
 }
 
-bool RSolverElectrostatics::hasConverged(void) const
+bool RSolverElectrostatics::hasConverged() const
 {
     return true;
 }
 
-void RSolverElectrostatics::updateScales(void)
+void RSolverElectrostatics::updateScales()
 {
 
 }
 
-void RSolverElectrostatics::recover(void)
+void RSolverElectrostatics::recover()
 {
     this->recoverVariable(R_VARIABLE_ELECTRIC_POTENTIAL,
                           R_VARIABLE_APPLY_NODE,
@@ -33,7 +33,7 @@ void RSolverElectrostatics::recover(void)
 //    this->syncShared("node-electric_potential",this->nodeElectricPotential);
 }
 
-void RSolverElectrostatics::prepare(void)
+void RSolverElectrostatics::prepare()
 {
     RRVector elementElectricPotential;
     RBVector electricPotentialSetValues;
@@ -361,7 +361,7 @@ void RSolverElectrostatics::prepare(void)
     }
 }
 
-void RSolverElectrostatics::solve(void)
+void RSolverElectrostatics::solve()
 {
     try
     {
@@ -386,7 +386,7 @@ void RSolverElectrostatics::solve(void)
     }
 }
 
-void RSolverElectrostatics::process(void)
+void RSolverElectrostatics::process()
 {
     // Initialize vectors
     this->elementElectricField.resize(this->pModel->getNElements(),RR3Vector(0.0,0.0,0.0));
@@ -655,7 +655,7 @@ void RSolverElectrostatics::process(void)
     }
 }
 
-void RSolverElectrostatics::store(void)
+void RSolverElectrostatics::store()
 {
     RLogger::info("Storing results\n");
     RLogger::indent();
@@ -775,7 +775,7 @@ void RSolverElectrostatics::store(void)
     RLogger::unindent();
 }
 
-void RSolverElectrostatics::statistics(void)
+void RSolverElectrostatics::statistics()
 {
     this->printStats(R_VARIABLE_ELECTRIC_POTENTIAL);
     this->printStats(R_VARIABLE_ELECTRIC_FIELD);

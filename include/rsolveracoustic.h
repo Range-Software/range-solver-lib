@@ -37,50 +37,50 @@ class RSolverAcoustic : public RSolverGeneric
         ~RSolverAcoustic();
 
         //! Check if solver has converged.
-        bool hasConverged(void) const;
+        bool hasConverged() const;
 
     protected:
 
-        double findSoundSpeedScale(void) const;
+        double findSoundSpeedScale() const;
 
         //! Update scales.
-        void updateScales(void);
+        void updateScales();
 
         //! Recover previously computed results.
-        void recover(void);
+        void recover();
 
         //! Prepare solver.
-        void prepare(void);
+        void prepare();
 
         //! Run matrix solver.
-        void solve(void);
+        void solve();
 
         //! Process solver results.
-        void process(void);
+        void process();
 
         //! Process absorbing boundary.
-        void processAbsorbingBoundary(void);
+        void processAbsorbingBoundary();
 
         //! Process acoustic pressure.
-        void processAcousticPressure(void);
+        void processAcousticPressure();
 
         //! Process acoustic particle velocity.
-        void processAcousticParticleVelocity(void);
+        void processAcousticParticleVelocity();
 
         //! Store solver results.
-        void store(void);
+        void store();
 
         //! Process statistics.
-        void statistics(void);
+        void statistics();
 
         //! Assembly matrix
         void assemblyMatrix(unsigned int elementID, const RRMatrix &Me, const RRMatrix &Ce, const RRMatrix &Ke, const RRVector &fe);
 
         //! Find absorbing boundary nodes.
-        std::vector<bool> findAbsorbingBoundaryNodes(void) const;
+        std::vector<bool> findAbsorbingBoundaryNodes() const;
 
         //! Find absorbing boundary elements.
-        std::vector<bool> findAbsorbingBoundaryElements(void) const;
+        std::vector<bool> findAbsorbingBoundaryElements() const;
 
         //! Find absorbing boundary nodes.
         std::vector<RR3Vector> findAbsorbingBoundaryNormals(const std::vector<bool> &absorbingBoundaryNodes) const;

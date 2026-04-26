@@ -20,6 +20,7 @@ class FluidHeatMatrixContainer
 
         // Element level vectors
         RRVector fv;    // f
+        RRVector vdiv;
 
     public:
 
@@ -38,11 +39,12 @@ class FluidHeatMatrixContainer
             this->yte.resize(nen,nen,0.0);
 
             this->fv.resize(nen,0.0);
+            this->vdiv.resize(nen,0.0);
 
             this->initialized = true;
         }
 
-        void clear(void)
+        void clear()
         {
             this->me.fill(0.0);
             this->ce.fill(0.0);
@@ -52,11 +54,14 @@ class FluidHeatMatrixContainer
             this->yte.fill(0.0);
 
             this->fv.fill(0.0);
+            this->vdiv.fill(0.0);
         }
 };
 
 RSolverFluidHeat::RSolverFluidHeat(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
+    , statsCounter(0)
+    , statsOldResidual(0.0)
 {
     this->problemType = R_PROBLEM_FLUID_HEAT;
 }
@@ -66,17 +71,17 @@ RSolverFluidHeat::~RSolverFluidHeat()
     this->clearShapeDerivatives();
 }
 
-bool RSolverFluidHeat::hasConverged(void) const
+bool RSolverFluidHeat::hasConverged() const
 {
     return true;
 }
 
-double RSolverFluidHeat::findTemperatureScale(void) const
+double RSolverFluidHeat::findTemperatureScale() const
 {
     return 1.0;
 }
 
-void RSolverFluidHeat::generateNodeHeatVector(void)
+void RSolverFluidHeat::generateNodeHeatVector()
 {
     RBVector heatSetValues;
     this->generateVariableVector(R_VARIABLE_HEAT,this->elementHeat,heatSetValues,true,this->firstRun,this->firstRun);
@@ -84,8 +89,8 @@ void RSolverFluidHeat::generateNodeHeatVector(void)
     this->nodeHeat.fill(0.0); // Heat on node is meant as an input - needs to be cleared
     this->pModel->convertElementToNodeVector(this->elementHeat,heatSetValues,this->nodeHeat,true);
 
-    RRVector qv(this->pModel->getNElements(),0.0);
-    RUVector qc(this->pModel->getNElements(),0);
+    RRVector qv(this->pModel->getNNodes(),0.0);
+    RUVector qc(this->pModel->getNNodes(),0);
 
     for (uint i=0;i<this->pModel->getNElements();i++)
     {
@@ -114,13 +119,13 @@ void RSolverFluidHeat::generateNodeHeatVector(void)
     }
 }
 
-void RSolverFluidHeat::updateScales(void)
+void RSolverFluidHeat::updateScales()
 {
     this->scales.setMetre(this->findMeshScale());
     this->scales.setKelvin(this->findTemperatureScale());
 }
 
-void RSolverFluidHeat::recover(void)
+void RSolverFluidHeat::recover()
 {
     this->recoveryStopWatch.reset();
     this->recoveryStopWatch.resume();
@@ -155,7 +160,7 @@ void RSolverFluidHeat::recover(void)
     this->recoveryStopWatch.pause();
 }
 
-void RSolverFluidHeat::prepare(void)
+void RSolverFluidHeat::prepare()
 {
     RLogger::info("Building matrix system\n");
     RLogger::indent();
@@ -165,7 +170,10 @@ void RSolverFluidHeat::prepare(void)
 
     RBVector temperatureSetValues;
 
-    this->generateNodeBook(R_PROBLEM_FLUID_HEAT);
+    if (this->taskIteration == 0 || this->meshChanged)
+    {
+        this->generateNodeBook(R_PROBLEM_FLUID_HEAT);
+    }
 
     this->generateVariableVector(R_VARIABLE_TEMPERATURE,this->elementTemperature,temperatureSetValues,true,this->firstRun,this->firstRun);
     this->generateMaterialVecor(RMaterialProperty::ThermalConductivity,this->elementConduction);
@@ -180,20 +188,46 @@ void RSolverFluidHeat::prepare(void)
     this->pModel->convertNodeToElementVector(this->nodeVelocity.y,this->elementVelocity.y);
     this->pModel->convertNodeToElementVector(this->nodeVelocity.z,this->elementVelocity.z);
 
-    this->computeShapeDerivatives();
-    this->streamVelocity = RSolverFluid::computeStreamVelocity(*this->pModel,this->nodeVelocity,false);
+    if (this->meshChanged)
+    {
+        this->clearShapeDerivatives();
+        this->computeShapeDerivatives();
+    }
+    if (this->taskIteration == 0)
+    {
+        this->streamVelocity = RSolverFluid::computeStreamVelocity(*this->pModel,this->nodeVelocity,false);
+    }
 
-    this->b.resize(this->nodeBook.getNEnabled());
-    this->x.resize(this->nodeBook.getNEnabled());
+    uint nEnabled = this->nodeBook.getNEnabled();
 
     this->A.clear();
-    this->A.setNRows(this->nodeBook.getNEnabled());
+    this->A.setNRows(nEnabled);
+    this->A.reserveNColumns(30);
+    this->b.resize(nEnabled);
+    this->x.resize(nEnabled);
     this->b.fill(0.0);
     this->x.fill(0.0);
+
+    int np = omp_get_max_threads();
+
+    QVector<RSparseMatrix> Ap;
+    Ap.resize(np);
+    QVector<RRVector> bp;
+    bp.resize(np);
+
+    for (int i=0;i<np;i++)
+    {
+        Ap[i].setNRows(nEnabled);
+        Ap[i].reserveNColumns(30);
+        bp[i].resize(nEnabled);
+        bp[i].fill(0.0);
+    }
 
     bool abort = false;
 
     RMatrixManager<FluidHeatMatrixContainer> matrixManager;
+
+    this->buildStopWatch.resume();
 
     // Compute element matrices
     #pragma omp parallel for default(shared) private(matrixManager)
@@ -215,27 +249,15 @@ void RSolverFluidHeat::prepare(void)
             RRMatrix Ae(nen,nen,0.0);
             RRVector be(nen,0.0);
 
-            RStopWatch localStopWatch;
-            localStopWatch.reset();
-
             if (R_ELEMENT_TYPE_IS_VOLUME(element.getType()))
             {
                 if (!this->computableElements[elementID])
                 {
                     continue;
                 }
-                localStopWatch.resume();
                 this->computeElement(elementID,Ae,be,matrixManager);
-                localStopWatch.pause();
             }
-            #pragma omp critical
-            {
-                this->buildStopWatch.addElapsedTime(localStopWatch.getMiliSeconds());
-
-                this->assemblyStopWatch.resume();
-                this->assemblyMatrix(elementID,Ae,be);
-                this->assemblyStopWatch.pause();
-            }
+            this->assemblyMatrix(elementID,Ae,be,Ap[omp_get_thread_num()],bp[omp_get_thread_num()]);
         }
         catch (const RError &rError)
         {
@@ -248,6 +270,21 @@ void RSolverFluidHeat::prepare(void)
         }
     }
 
+    this->buildStopWatch.pause();
+    this->assemblyStopWatch.resume();
+
+#pragma omp parallel for default(shared)
+    for (int64_t i=0;i<int64_t(this->A.getNRows());i++)
+    {
+        for (int j=0;j<np;j++)
+        {
+            this->A.getVector(uint(i)).addVector(Ap[j].getVector(uint(i)));
+            this->b[uint(i)] += bp[j][uint(i)];
+        }
+    }
+
+    this->assemblyStopWatch.pause();
+
     if (abort)
     {
         RLogger::unindent();
@@ -257,7 +294,7 @@ void RSolverFluidHeat::prepare(void)
     RLogger::unindent();
 }
 
-void RSolverFluidHeat::solve(void)
+void RSolverFluidHeat::solve()
 {
     RLogger::info("Solving matrix system\n");
     RLogger::indent();
@@ -305,7 +342,7 @@ void RSolverFluidHeat::solve(void)
     RLogger::unindent();
 }
 
-void RSolverFluidHeat::process(void)
+void RSolverFluidHeat::process()
 {
     double Qx;
     double Qy;
@@ -362,7 +399,7 @@ void RSolverFluidHeat::process(void)
     }
 }
 
-void RSolverFluidHeat::store(void)
+void RSolverFluidHeat::store()
 {
     RLogger::info("Storing results\n");
     RLogger::indent();
@@ -408,22 +445,19 @@ void RSolverFluidHeat::store(void)
     RLogger::unindent();
 }
 
-void RSolverFluidHeat::statistics(void)
+void RSolverFluidHeat::statistics()
 {
-    static uint counter = 0;
-    static double oldResidual = 0.0;
-
     double scale = std::pow(this->scales.getSecond(),2) / this->scales.getKilogram();
     double residual = RRVector::euclideanNorm(this->b)*scale;
-    double convergence = residual - oldResidual;
-    oldResidual = residual;
+    double convergence = residual - this->statsOldResidual;
+    this->statsOldResidual = residual;
 
     std::vector<RIterationInfoValue> cvgValues;
     cvgValues.push_back(RIterationInfoValue("Solver residual",residual));
     cvgValues.push_back(RIterationInfoValue("Solver convergence",convergence));
     cvgValues.push_back(RIterationInfoValue("Temperature convergence",this->cvgT));
 
-    RIterationInfo::writeToFile(this->convergenceFileName,counter,cvgValues);
+    RIterationInfo::writeToFile(this->convergenceFileName,this->statsCounter,cvgValues);
 
     this->printStats(R_VARIABLE_TEMPERATURE);
     this->printStats(R_VARIABLE_HEAT_FLUX);
@@ -435,10 +469,10 @@ void RSolverFluidHeat::statistics(void)
     RLogger::info("Solver time:   %9u [ms]\n",this->solverStopWatch.getMiliSeconds());
     RLogger::info("Update time:   %9u [ms]\n",this->updateStopWatch.getMiliSeconds());
 
-    counter++;
+    this->statsCounter++;
 }
 
-void RSolverFluidHeat::computeShapeDerivatives(void)
+void RSolverFluidHeat::computeShapeDerivatives()
 {
     this->shapeDerivations.resize(this->pModel->getNElements(),0);
 
@@ -461,12 +495,13 @@ void RSolverFluidHeat::computeShapeDerivatives(void)
     }
 }
 
-void RSolverFluidHeat::clearShapeDerivatives(void)
+void RSolverFluidHeat::clearShapeDerivatives()
 {
     for (uint i=0;i<this->shapeDerivations.size();i++)
     {
         delete this->shapeDerivations[i];
     }
+    this->shapeDerivations.clear();
 }
 
 void RSolverFluidHeat::computeElement(unsigned int elementID, RRMatrix &Ae, RRVector &be, RMatrixManager<FluidHeatMatrixContainer> &matrixManager)
@@ -535,7 +570,8 @@ void RSolverFluidHeat::computeElementGeneral(unsigned int elementID, RRMatrix &A
         double integValue = detJ * shapeFunc.getW();
 
         // velocity divergence
-        RRVector vdiv(nen,0.0);
+        RRVector &vdiv = matrixCotainer.vdiv;
+        vdiv.fill(0.0);
         // element length scale
         double h = 0.0;
 
@@ -675,7 +711,8 @@ void RSolverFluidHeat::computeElementConstantDerivative(unsigned int elementID, 
     const RRMatrix &B = this->shapeDerivations[elementID]->getDerivative(0);
 
     // velocity divergence
-    RRVector vdiv(nen,0.0);
+    RRVector &vdiv = matrixCotainer.vdiv;
+    vdiv.fill(0.0);
     // element length scale
     double h = 0.0;
 
@@ -795,6 +832,49 @@ void RSolverFluidHeat::assemblyMatrix(unsigned int elementID, const RRMatrix &Ae
                 if (this->nodeBook.getValue(rElement.getNodeId(n),np))
                 {
                     this->A.addValue(mp,np,Ae[m][n]);
+                }
+            }
+        }
+    }
+}
+
+void RSolverFluidHeat::assemblyMatrix(unsigned int elementID, const RRMatrix &Ae, const RRVector &be, RSparseMatrix &Ap, RRVector &bp)
+{
+    const RElement &rElement = this->pModel->getElement(elementID);
+    RRVector fe(be);
+
+    // Apply explicit boundary conditions.
+    for (uint m=0;m<rElement.size();m++)
+    {
+        uint mp = 0;
+        uint nodeID = rElement.getNodeId(m);
+        if (!this->nodeBook.getValue(nodeID,mp))
+        {
+            for (uint n=0;n<rElement.size();n++)
+            {
+                fe[n] -= Ae[n][m] * this->nodeTemperature[nodeID];
+            }
+        }
+    }
+
+    // Assembly final matrix system
+    for (uint m=0;m<rElement.size();m++)
+    {
+        uint mp = 0;
+        uint nodeIDm = rElement.getNodeId(m);
+
+        if (this->nodeBook.getValue(nodeIDm,mp))
+        {
+            bp[mp] += fe[m];
+
+            for (uint n=0;n<rElement.size();n++)
+            {
+                uint np = 0;
+                uint nodeIDn = rElement.getNodeId(n);
+
+                if (this->nodeBook.getValue(nodeIDn,np))
+                {
+                    Ap.addValue(mp,np,Ae[m][n]);
                 }
             }
         }

@@ -33,36 +33,36 @@ class RSolverRadiativeHeat : public RSolverGeneric
         ~RSolverRadiativeHeat();
 
         //! Check if solver has converged.
-        bool hasConverged(void) const;
+        bool hasConverged() const;
 
     protected:
 
         //! Find temperature scale.
-        double findTemperatureScale(void) const;
+        double findTemperatureScale() const;
 
         //! Update scales.
-        void updateScales(void);
+        void updateScales();
 
         //! Recover previously computed results.
-        void recover(void);
+        void recover();
 
         //! Prepare view-factors.
-        void prepareViewFactors(void);
+        void prepareViewFactors();
 
         //! Prepare solver.
-        void prepare(void);
+        void prepare();
 
         //! Run matrix solver.
-        void solve(void);
+        void solve();
 
         //! Process solver results.
-        void process(void);
+        void process();
 
         //! Store solver results.
-        void store(void);
+        void store();
 
         //! Process statistics.
-        void statistics(void);
+        void statistics();
 
         //! Check if view-factor header correspond with input.
         bool checkViewFactorHeader(const RViewFactorMatrixHeader &viewFactorMatrixHeader) const;

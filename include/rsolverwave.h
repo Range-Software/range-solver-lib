@@ -24,30 +24,30 @@ class RSolverWave : public RSolverGeneric
         ~RSolverWave();
 
         //! Check if solver has converged.
-        bool hasConverged(void) const;
+        bool hasConverged() const;
 
     protected:
 
         //! Update scales.
-        void updateScales(void);
+        void updateScales();
 
         //! Recover previously computed results.
-        void recover(void);
+        void recover();
 
         //! Prepare solver.
-        void prepare(void);
+        void prepare();
 
         //! Run matrix solver.
-        void solve(void);
+        void solve();
 
         //! Process solver results.
-        void process(void);
+        void process();
 
         //! Store solver results.
-        void store(void);
+        void store();
 
         //! Process statistics.
-        void statistics(void);
+        void statistics();
 
 };
 

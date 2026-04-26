@@ -44,7 +44,7 @@ class RSolverSharedData
         RRVector &findData(const QString &name);
 
         //! Clear shared data.
-        void clearData(void);
+        void clearData();
 
 };
 

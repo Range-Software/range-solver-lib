@@ -102,12 +102,10 @@ void RSolverGeneric::run(bool firstRun, uint taskIteration)
             this->applyDisplacement();
         }
 
-        static bool updateScalesDone = false;
-        if (!updateScalesDone || this->problemType == R_PROBLEM_MESH)
+        if (this->firstRun || this->problemType == R_PROBLEM_MESH)
         {
             this->updateScales();
         }
-        updateScalesDone = true;
         if (this->problemType != R_PROBLEM_MESH)
         {
             this->scales.downscale(*this->pModel);
@@ -191,7 +189,7 @@ void RSolverGeneric::updateOldRecords(const RTimeSolver &rTimeSolver, const QStr
     }
 }
 
-RRVector RSolverGeneric::findElementSizes(void) const
+RRVector RSolverGeneric::findElementSizes() const
 {
     uint ne = this->pModel->getNElements();
     RRVector elementSizes(ne,0.0);
@@ -265,12 +263,12 @@ double RSolverGeneric::findElementScale(bool onlyVolumes) const
     return 1.0 / elementSize;
 }
 
-double RSolverGeneric::findMeshScale(void) const
+double RSolverGeneric::findMeshScale() const
 {
     return this->pModel->findNodeScale();
 }
 
-void RSolverGeneric::updateLocalRotations(void)
+void RSolverGeneric::updateLocalRotations()
 {
     std::vector<RR3Vector> nodeNormals(this->pModel->getNNodes());
     RBVector nodeNormalsBook(this->pModel->getNNodes(),false);
@@ -412,17 +410,17 @@ void RSolverGeneric::updateLocalRotations(void)
     }
 }
 
-void RSolverGeneric::clearSharedData(void)
+void RSolverGeneric::clearSharedData()
 {
     this->pSharedData->clearData();
 }
 
-void RSolverGeneric::storeSharedData(void)
+void RSolverGeneric::storeSharedData()
 {
     this->pSharedData->addData("element-temperature",this->elementTemperature);
 }
 
-void RSolverGeneric::recoverSharedData(void)
+void RSolverGeneric::recoverSharedData()
 {
     if (this->pSharedData->hasData("element-temperature",this->pModel->getNElements()))
     {
@@ -430,7 +428,7 @@ void RSolverGeneric::recoverSharedData(void)
     }
 }
 
-void RSolverGeneric::writeResults(void)
+void RSolverGeneric::writeResults()
 {
     if (this->modelFileName.isEmpty())
     {
@@ -455,7 +453,7 @@ void RSolverGeneric::writeResults(void)
     }
 }
 
-void RSolverGeneric::applyDisplacement(void)
+void RSolverGeneric::applyDisplacement()
 {
     uint variablePosition = this->pModel->findVariable(R_VARIABLE_DISPLACEMENT);
     if (variablePosition == RConstants::eod)
@@ -475,7 +473,7 @@ void RSolverGeneric::applyDisplacement(void)
     }
 }
 
-void RSolverGeneric::removeDisplacement(void)
+void RSolverGeneric::removeDisplacement()
 {
     uint variablePosition = this->pModel->findVariable(R_VARIABLE_DISPLACEMENT);
     if (variablePosition == RConstants::eod)
@@ -506,6 +504,7 @@ void RSolverGeneric::generateNodeBook(RProblemType problemType)
     }
 
     this->nodeBook.resize(this->pModel->getNNodes());
+    RBVector disabledPositions(this->nodeBook.size(),false);
 
     for (unsigned int i=0;i<this->pModel->getNElementGroups();i++)
     {
@@ -534,7 +533,7 @@ void RSolverGeneric::generateNodeBook(RProblemType problemType)
                 const RElement &element = this->pModel->getElement(pElementGroup->get(j));
                 for (unsigned int k=0;k<element.size();k++)
                 {
-                    this->nodeBook.disable(element.getNodeId(k),true);
+                    disabledPositions[element.getNodeId(k)] = true;
                 }
             }
         }
@@ -555,7 +554,28 @@ void RSolverGeneric::generateNodeBook(RProblemType problemType)
     {
         if (!computableNodes[i])
         {
-            this->nodeBook.disable(i,true);
+            disabledPositions[i] = true;
+        }
+    }
+
+    RSolverGeneric::rebuildNodeBook(this->nodeBook,disabledPositions);
+}
+
+void RSolverGeneric::rebuildNodeBook(RBook &nodeBook, const RBVector &disabledPositions)
+{
+    R_ERROR_ASSERT(nodeBook.size() == disabledPositions.size());
+
+    uint nextPosition = 0;
+    for (uint i=0;i<nodeBook.size();i++)
+    {
+        if (disabledPositions[i])
+        {
+            nodeBook.setValue(i,RConstants::eod);
+        }
+        else
+        {
+            nodeBook.setValue(i,nextPosition);
+            nextPosition++;
         }
     }
 }
@@ -774,7 +794,7 @@ void RSolverGeneric::findComputableElements(RProblemType problemType)
     }
 }
 
-void RSolverGeneric::findIncludableElements(void)
+void RSolverGeneric::findIncludableElements()
 {
     this->includableElements = this->computableElements;
 
@@ -814,7 +834,7 @@ void RSolverGeneric::findIncludableElements(void)
 
 }
 
-void RSolverGeneric::findInwardElements(void)
+void RSolverGeneric::findInwardElements()
 {
     this->inwardElements.resize(this->pModel->getNElements());
     this->inwardElements.fill(false);
@@ -902,7 +922,7 @@ void RSolverGeneric::findInwardElements(void)
     }
 }
 
-void RSolverGeneric::processMonitoringPoints(void) const
+void RSolverGeneric::processMonitoringPoints() const
 {
     for (uint i=0;i<this->pModel->getMonitoringPointManager().size();i++)
     {

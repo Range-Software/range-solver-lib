@@ -44,12 +44,12 @@ class RSolver
         ~RSolver();
 
         //! Run solver.
-        void run(void);
+        void run();
 
     protected:
 
         //! Run single solver.
-        void runSingle(void);
+        void runSingle();
 
         //! Run single solver for given problem task.
         //! Return task convergence status (true = converged).

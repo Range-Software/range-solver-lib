@@ -14,12 +14,12 @@ RSolverAcoustic::~RSolverAcoustic()
 
 }
 
-bool RSolverAcoustic::hasConverged(void) const
+bool RSolverAcoustic::hasConverged() const
 {
     return true;
 }
 
-double RSolverAcoustic::findSoundSpeedScale(void) const
+double RSolverAcoustic::findSoundSpeedScale() const
 {
     if (this->pModel->getNElements() == 0)
     {
@@ -49,7 +49,7 @@ double RSolverAcoustic::findSoundSpeedScale(void) const
     return 1.0 / cavg;
 }
 
-void RSolverAcoustic::updateScales(void)
+void RSolverAcoustic::updateScales()
 {
 //    double sScale = this->findSoundSpeedScale();
 //    double eScale = this->findElementScale(true);
@@ -64,7 +64,7 @@ void RSolverAcoustic::updateScales(void)
     //    this->scales.setSecond(eScale/sScale);
 }
 
-void RSolverAcoustic::recover(void)
+void RSolverAcoustic::recover()
 {
     this->recoverVariable(R_VARIABLE_POTENTIAL,
                           R_VARIABLE_APPLY_NODE,
@@ -86,7 +86,7 @@ void RSolverAcoustic::recover(void)
                           0.0);
 }
 
-void RSolverAcoustic::prepare(void)
+void RSolverAcoustic::prepare()
 {
     //! Element velocity potential - displacement.
     RRVector elementVelocityPotential;
@@ -452,7 +452,7 @@ void RSolverAcoustic::prepare(void)
     }
 }
 
-void RSolverAcoustic::solve(void)
+void RSolverAcoustic::solve()
 {
     try
     {
@@ -501,7 +501,7 @@ void RSolverAcoustic::solve(void)
     }
 }
 
-void RSolverAcoustic::process(void)
+void RSolverAcoustic::process()
 {
     // Process absorbing boundary
     this->processAbsorbingBoundary();
@@ -513,7 +513,7 @@ void RSolverAcoustic::process(void)
     this->processAcousticParticleVelocity();
 }
 
-void RSolverAcoustic::processAbsorbingBoundary(void)
+void RSolverAcoustic::processAbsorbingBoundary()
 {
     // Find nodes which are on absorbing boundary.
     std::vector<bool> absorbingBoundaryNodes = this->findAbsorbingBoundaryNodes();
@@ -586,7 +586,7 @@ void RSolverAcoustic::processAbsorbingBoundary(void)
     }
 }
 
-void RSolverAcoustic::processAcousticPressure(void)
+void RSolverAcoustic::processAcousticPressure()
 {
     this->nodeAcousticPressure.resize(this->pModel->getNNodes(),0.0);
 
@@ -605,7 +605,7 @@ void RSolverAcoustic::processAcousticPressure(void)
     }
 }
 
-void RSolverAcoustic::processAcousticParticleVelocity(void)
+void RSolverAcoustic::processAcousticParticleVelocity()
 {
     this->elementAcousticParticleVelocity.x.resize(this->pModel->getNElements(),0.0);
     this->elementAcousticParticleVelocity.y.resize(this->pModel->getNElements(),0.0);
@@ -857,7 +857,7 @@ void RSolverAcoustic::processAcousticParticleVelocity(void)
     }
 }
 
-void RSolverAcoustic::store(void)
+void RSolverAcoustic::store()
 {
     RLogger::info("Storing results\n");
     RLogger::indent();
@@ -938,7 +938,7 @@ void RSolverAcoustic::store(void)
     RLogger::unindent();
 }
 
-void RSolverAcoustic::statistics(void)
+void RSolverAcoustic::statistics()
 {
     this->printStats(R_VARIABLE_POTENTIAL);
     this->printStats(R_VARIABLE_ACOUSTIC_PARTICLE_VELOCITY);
@@ -946,7 +946,7 @@ void RSolverAcoustic::statistics(void)
     this->processMonitoringPoints();
 }
 
-std::vector<bool> RSolverAcoustic::findAbsorbingBoundaryNodes(void) const
+std::vector<bool> RSolverAcoustic::findAbsorbingBoundaryNodes() const
 {
     std::vector<bool> absorbingBoundaryNodes;
     absorbingBoundaryNodes.resize(this->pModel->getNNodes(),false);

@@ -12,23 +12,23 @@ RSolverHeat::~RSolverHeat()
 {
 }
 
-bool RSolverHeat::hasConverged(void) const
+bool RSolverHeat::hasConverged() const
 {
     return true;
 }
 
-double RSolverHeat::findTemperatureScale(void) const
+double RSolverHeat::findTemperatureScale() const
 {
     return 1.0;
 }
 
-void RSolverHeat::updateScales(void)
+void RSolverHeat::updateScales()
 {
     this->scales.setMetre(this->findMeshScale());
     this->scales.setKelvin(this->findTemperatureScale());
 }
 
-void RSolverHeat::recover(void)
+void RSolverHeat::recover()
 {
     this->recoverVariable(R_VARIABLE_TEMPERATURE,
                           R_VARIABLE_APPLY_NODE,
@@ -56,8 +56,10 @@ void RSolverHeat::recover(void)
                           0.0);
 }
 
-void RSolverHeat::prepare(void)
+void RSolverHeat::prepare()
 {
+    const bool timeSolverEnabled = this->pModel->getTimeSolver().getEnabled();
+
     RBVector temperatureSetValues;
     RBVector heatSetValues;
 
@@ -121,7 +123,7 @@ void RSolverHeat::prepare(void)
                         for (unsigned n=0;n<element.size();n++)
                         {
                             // Mass
-                            if (this->pModel->getTimeSolver().getEnabled())
+                            if (timeSolverEnabled)
                             {
                                 Me[m][n] += N[m] * N[n]
                                          * this->elementDensity[elementID]
@@ -209,7 +211,7 @@ void RSolverHeat::prepare(void)
                             Ke[m][n] += kcnd * detJ * shapeFunc.getW();
 
                             // Mass
-                            if (this->pModel->getTimeSolver().getEnabled())
+                            if (timeSolverEnabled)
                             {
                                 Me[m][n] += N[m] * N[n]
                                          * this->elementDensity[elementID]
@@ -308,7 +310,7 @@ void RSolverHeat::prepare(void)
                             Ke[m][n] += (kcnd + kcnv) * detJ * shapeFunc.getW();
 
                             // Mass
-                            if (this->pModel->getTimeSolver().getEnabled())
+                            if (timeSolverEnabled)
                             {
                                 Me[m][n] += N[m] * N[n]
                                          * this->elementDensity[elementID]
@@ -415,7 +417,7 @@ void RSolverHeat::prepare(void)
                                      * shapeFunc.getW();
 
                             // Mass
-                            if (this->pModel->getTimeSolver().getEnabled())
+                            if (timeSolverEnabled)
                             {
                                 Me[m][n] += N[m] * N[n]
                                          * this->elementDensity[elementID]
@@ -449,7 +451,7 @@ void RSolverHeat::prepare(void)
     }
 }
 
-void RSolverHeat::solve(void)
+void RSolverHeat::solve()
 {
     try
     {
@@ -476,7 +478,7 @@ void RSolverHeat::solve(void)
     this->pModel->convertNodeToElementVector(this->nodeTemperature,this->elementTemperature);
 }
 
-void RSolverHeat::process(void)
+void RSolverHeat::process()
 {
 //    RLogger::info("Processing results\n");
     double Qx;
@@ -693,7 +695,7 @@ void RSolverHeat::process(void)
     }
 }
 
-void RSolverHeat::store(void)
+void RSolverHeat::store()
 {
     RLogger::info("Storing results\n");
     RLogger::indent();
@@ -739,7 +741,7 @@ void RSolverHeat::store(void)
     RLogger::unindent();
 }
 
-void RSolverHeat::statistics(void)
+void RSolverHeat::statistics()
 {
     this->printStats(R_VARIABLE_TEMPERATURE);
     this->printStats(R_VARIABLE_HEAT_FLUX);

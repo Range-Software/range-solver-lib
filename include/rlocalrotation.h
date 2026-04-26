@@ -35,22 +35,22 @@ class RLocalRotation
         RLocalRotation &operator =(const RLocalRotation &localRotation);
 
         //! Return true if local rotation is active.
-        bool isActive(void) const;
+        bool isActive() const;
 
         //! Activate local rotation.
         void activate(const RRMatrix &R);
 
         //! Deactivate local rotation.
-        void deactivate(void);
+        void deactivate();
 
         //! Return const reference to rotation matrix.
-        inline const RRMatrix &getR(void) const
+        inline const RRMatrix &getR() const
         {
             return this->R;
         }
 
         //! Return const reference to inverse rotation matrix.
-        inline const RRMatrix &getInverseR(void) const
+        inline const RRMatrix &getInverseR() const
         {
             return this->iR;
         }

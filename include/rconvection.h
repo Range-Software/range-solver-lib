@@ -89,57 +89,57 @@ class RConvection
         void setFluidTemp(double Tf);
 
         //! Calculate Gr number.
-        double calculateGr(void) const;
+        double calculateGr() const;
 
         //! Calculate Ra number.
-        double calculateRa(void) const;
+        double calculateRa() const;
 
         //! Calculate Reynolds number.
-        double calculateRe(void) const;
+        double calculateRe() const;
 
         //! Calculate Prandtl number.
-        double calculatePr(void) const;
+        double calculatePr() const;
 
         //! Calculate Nusslet number.
-        double calculateNu(void) const;
+        double calculateNu() const;
 
         //! Calulate heat transfer (convection) coefficient.
-        double calculateHtc(void) const;
+        double calculateHtc() const;
 
         //! Return convection type.
-        inline RConvectionType getType(void) const
+        inline RConvectionType getType() const
         {
             return this->type;
         }
 
         //! Return diameter.
-        inline double getDiameter(void) const
+        inline double getDiameter() const
         {
             return this->d;
         }
 
         //! Return velocity.
-        inline double getVelocity(void) const
+        inline double getVelocity() const
         {
             return this->v;
         }
 
         //! Return gravity.
-        inline double getGravity(void) const
+        inline double getGravity() const
         {
             return this->g;
         }
 
         //! Return surface temperature.
-        inline double getSurfTemp(void) const
+        inline double getSurfTemp() const
         {
             return this->Ts;
         }
 
         //! Return fluid temperature.
-        inline double getFluidTemp(void) const
+        inline double getFluidTemp() const
         {
-            return this->Ts;
+            return this->Tf;
         }
 
         //! Return name (description string).

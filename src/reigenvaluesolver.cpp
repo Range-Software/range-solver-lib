@@ -2,7 +2,7 @@
 
 #include "reigenvaluesolver.h"
 
-#define R_EIS_PYTHAG(a,b) (std::sqrt (a*a + b*b))
+#define R_EIS_PYTHAG(a,b) (std::sqrt ((a)*(a) + (b)*(b)))
 #define R_ASSERT(_condition) { if (!(_condition)) { RLogger::unindent(); R_ERROR_ASSERT(_condition); } }
 
 void REigenValueSolver::_init(const REigenValueSolver *pEigenValueSolver)
@@ -311,8 +311,7 @@ void REigenValueSolver::solveRayleigh(const RSparseMatrix &M, const RSparseMatri
     }
     b.normalize();
 
-    double eps = this->eigenValueSolverConf.getSolverCvgValue();
-    double mu = std::max(d[0], 1.0e9 * double(rand()) / double(RAND_MAX));
+    double mu = 1.0e9 * double(rand()) / double(RAND_MAX);
     uint nIterations = this->eigenValueSolverConf.getNIterations();
 
     std::vector< std::vector<uint> > mIndexes;
@@ -463,29 +462,29 @@ void REigenValueSolver::qlDecomposition(RRVector &d, RRVector &e)
 
             double s = 1.0, c = 1.0, p = 0.0;
             // A plane rotation as in the original QL, followed by Givens rotations to restore tridiagonal form
-            uint i;
-            for (i=m-1;i>=l;i++)
+            int gi;
+            for (gi=int(m)-1;gi>=int(l);gi--)
             {
-                double f = s * e[i];
-                double b = c * e[i];
-                e[i+1] = (r = R_EIS_PYTHAG(f,g));
+                double f = s * e[gi];
+                double b = c * e[gi];
+                e[gi+1] = (r = R_EIS_PYTHAG(f,g));
 
                 // Recover from underflow
                 if (r == 0.0)
                 {
-                    d[i+1] -= p;
+                    d[gi+1] -= p;
                     e[m] = 0.0;
                     break;
                 }
 
                 s = f/r;
                 c = g/r;
-                g = d[i+1] - p;
-                r = (d[i] - g) * s + 2.0 * c * b;
-                d[i+1] = g + (p = s * r);
+                g = d[gi+1] - p;
+                r = (d[gi] - g) * s + 2.0 * c * b;
+                d[gi+1] = g + (p = s * r);
                 g = c * r - b;
             }
-            if (r == 0.0 && i >= l)
+            if (r == 0.0 && gi >= int(l))
             {
                 continue;
             }

@@ -43,43 +43,43 @@ class RScales
         RScales & operator =(const RScales &scales);
 
         //! Return legth.
-        inline double getMetre(void) const { return this->metre; }
+        inline double getMetre() const { return this->metre; }
 
         //! Set legth.
         inline void setMetre(double metre) { this->metre = metre; }
 
         //! Return mass.
-        inline double getKilogram(void) const { return this->kilogram; }
+        inline double getKilogram() const { return this->kilogram; }
 
         //! Set mass.
         inline void setKilogram(double kilogram) { this->kilogram = kilogram; }
 
         //! Return time.
-        inline double getSecond(void) const { return this->second; }
+        inline double getSecond() const { return this->second; }
 
         //! Set time.
         inline void setSecond(double second) { this->second = second; }
 
         //! Return electric current.
-        inline double getAmpere(void) const { return this->ampere; }
+        inline double getAmpere() const { return this->ampere; }
 
         //! Set electric current.
         inline void setAmpere(double ampere) { this->ampere = ampere; }
 
         //! Return temperature.
-        inline double getKelvin(void) const { return this->kelvin; }
+        inline double getKelvin() const { return this->kelvin; }
 
         //! Set temperature.
         inline void setKelvin(double kelvin) { this->kelvin = kelvin; }
 
         //! Return luminous intensity.
-        inline double getCandela(void) const { return this->candela; }
+        inline double getCandela() const { return this->candela; }
 
         //! Set luminous intensity.
         inline void setCandela(double candela) { this->candela = candela; }
 
         //! Return amount of substance.
-        inline double getMole(void) const { return this->mole; }
+        inline double getMole() const { return this->mole; }
 
         //! Set amount of substance.
         inline void setMole(double mole) { this->mole = mole; }

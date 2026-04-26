@@ -35,7 +35,7 @@ RLocalRotation &RLocalRotation::operator =(const RLocalRotation &localRotation)
     return (*this);
 }
 
-bool RLocalRotation::isActive(void) const
+bool RLocalRotation::isActive() const
 {
     return this->active;
 }
@@ -50,7 +50,7 @@ void RLocalRotation::activate(const RRMatrix &matrix)
     this->iR.invert();
 }
 
-void RLocalRotation::deactivate(void)
+void RLocalRotation::deactivate()
 {
     this->active = false;
     this->R.clear();

@@ -32,6 +32,8 @@ class RHemiCubeSector
 
         //! Limit polygon.
         std::vector<RR3Vector> limitPolygon;
+        //! Cached bounding box of limitPolygon (computed once after construction).
+        RLimitBox limitBox;
         //! Resolution.
         uint resolution;
         //! Eye position.
@@ -68,7 +70,7 @@ class RHemiCubeSector
         RHemiCubeSector &operator =(const RHemiCubeSector &hemiCubeSector);
 
         //! Return size of the sector.
-        uint getSize(void) const;
+        uint getSize() const;
 
         //! Return const reference to pixel at given position.
         const RHemiCubePixel &getPixel(uint position) const;
@@ -94,10 +96,10 @@ class RHemiCubeSector
                       RHemiCubeSectorType type);
 
         //! Return limit polygon.
-        std::vector<RR3Vector> findLimitPolygon(void) const;
+        std::vector<RR3Vector> findLimitPolygon() const;
 
         //! Find limit polygons min and max ranges.
-        RLimitBox findLimitBox(void) const;
+        RLimitBox findLimitBox() const;
 
 };
 

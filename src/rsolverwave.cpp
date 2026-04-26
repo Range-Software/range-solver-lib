@@ -11,29 +11,27 @@ RSolverWave::~RSolverWave()
 
 }
 
-bool RSolverWave::hasConverged(void) const
+bool RSolverWave::hasConverged() const
 {
     return true;
 }
 
-void RSolverWave::updateScales(void)
+void RSolverWave::updateScales()
 {
 
 }
 
-void RSolverWave::recover(void)
+void RSolverWave::recover()
 {
 
 }
 
-void RSolverWave::prepare(void)
+void RSolverWave::prepare()
 {
-    static bool firstTime = true;
-
     RBVector waveDisplacementExplicitFlags;
 
     this->generateNodeBook(R_PROBLEM_WAVE);
-    this->generateVariableVector(R_VARIABLE_WAVE_DISPLACEMENT,this->elementWaveDisplacement,waveDisplacementExplicitFlags,true,firstTime,firstTime);
+    this->generateVariableVector(R_VARIABLE_WAVE_DISPLACEMENT,this->elementWaveDisplacement,waveDisplacementExplicitFlags,true,this->firstRun,this->firstRun);
 //    this->generateVariableVector(R_VARIABLE_W,this->elementWaveDisplacement,waveDisplacementExplicitFlags,true,firstTime,firstTime);
 
     this->b.resize(this->nodeBook.getNEnabled());
@@ -44,22 +42,22 @@ void RSolverWave::prepare(void)
     this->x.fill(0.0);
 }
 
-void RSolverWave::solve(void)
+void RSolverWave::solve()
 {
 
 }
 
-void RSolverWave::process(void)
+void RSolverWave::process()
 {
 
 }
 
-void RSolverWave::store(void)
+void RSolverWave::store()
 {
 
 }
 
-void RSolverWave::statistics(void)
+void RSolverWave::statistics()
 {
 
 }

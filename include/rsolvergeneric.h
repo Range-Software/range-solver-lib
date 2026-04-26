@@ -97,7 +97,7 @@ class RSolverGeneric
         void setMeshChanged(bool meshChanged);
 
         //! Check if solver has converged.
-        virtual bool hasConverged(void) const = 0;
+        virtual bool hasConverged() const = 0;
 
         //! Update old records.
         static void updateOldRecords(const RTimeSolver &rTimeSolver, const QString &modelFileName);
@@ -105,58 +105,61 @@ class RSolverGeneric
     protected:
 
         //! Find element sizes.
-        RRVector findElementSizes(void) const;
+        RRVector findElementSizes() const;
 
         //! Find element scale.
         double findElementScale(bool onlyVolumes = false) const;
 
         //! Find mesh scale.
-        double findMeshScale(void) const;
+        double findMeshScale() const;
 
         //! Update local rotations.
-        void updateLocalRotations(void);
+        void updateLocalRotations();
 
         //! Clear shared data.
-        virtual void clearSharedData(void);
+        virtual void clearSharedData();
 
         //! Store shared data.
-        virtual void storeSharedData(void);
+        virtual void storeSharedData();
 
         //! Recover shared data.
-        virtual void recoverSharedData(void);
+        virtual void recoverSharedData();
 
         //! Update scales.
-        virtual void updateScales(void) = 0;
+        virtual void updateScales() = 0;
 
         //! Recover previously computed results.
-        virtual void recover(void) = 0;
+        virtual void recover() = 0;
 
         //! Prepare solver.
-        virtual void prepare(void) = 0;
+        virtual void prepare() = 0;
 
         //! Run matrix solver.
-        virtual void solve(void) = 0;
+        virtual void solve() = 0;
 
         //! Process solver results.
-        virtual void process(void) = 0;
+        virtual void process() = 0;
 
         //! Store solver results.
-        virtual void store(void) = 0;
+        virtual void store() = 0;
 
         //! Process statistics.
-        virtual void statistics(void) = 0;
+        virtual void statistics() = 0;
 
         //! Write results.
-        void writeResults(void);
+        void writeResults();
 
         //! Apply displacement if possible.
-        void applyDisplacement(void);
+        void applyDisplacement();
 
         //! Remove displacement if possible.
-        void removeDisplacement(void);
+        void removeDisplacement();
 
         //! Generate node book.
         void generateNodeBook(RProblemType problemType);
+
+        //! Rebuild node book from disabled positions.
+        static void rebuildNodeBook(RBook &nodeBook, const RBVector &disabledPositions);
 
         //! Generate material element vector.
         void generateMaterialVecor(RMaterialProperty::Type materialPropertyType, RRVector &materialPropertyValues) const;
@@ -191,7 +194,7 @@ class RSolverGeneric
         void findInwardElements();
 
         //! Process monitoring points.
-        void processMonitoringPoints(void) const;
+        void processMonitoringPoints() const;
 
         //! Print results statistics.
         void printStats(RVariableType variableType) const;

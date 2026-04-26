@@ -69,16 +69,16 @@ class RIterationInfo
         void setOutputFileName(const QString &outputFileName);
 
         //! Return true if iterations have converged.
-        bool hasConverged(void) const;
+        bool hasConverged() const;
 
         //! Print header.
         void printHeader(const QString &title) const;
 
         //! Print footer.
-        void printFooter(void) const;
+        void printFooter() const;
 
         //! Print iteration information.
-        void printIteration(void) const;
+        void printIteration() const;
 
         //! Static function to write convergence to file.
         static void writeToFile(const QString &fileName, uint iteration, const std::vector<RIterationInfoValue> &iterationValues);
@@ -86,7 +86,7 @@ class RIterationInfo
     protected:
 
         //! Write iteration information to file.
-        void writeToFile(void) const;
+        void writeToFile() const;
 
 };
 

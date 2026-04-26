@@ -87,7 +87,7 @@ void RIterationInfo::setOutputFileName(const QString &outputFileName)
     this->outputFileName = outputFileName;
 }
 
-bool RIterationInfo::hasConverged(void) const
+bool RIterationInfo::hasConverged() const
 {
     if (!std::isnormal(this->error))
     {
@@ -121,7 +121,7 @@ void RIterationInfo::printHeader(const QString &title) const
     RLogger::info("-------------------------------------------------------------------------------\n");
 }
 
-void RIterationInfo::printFooter(void) const
+void RIterationInfo::printFooter() const
 {
     if (this->outputFrequency == 0)
     {
@@ -130,7 +130,7 @@ void RIterationInfo::printFooter(void) const
     RLogger::info("-------------------------------------------------------------------------------\n");
 }
 
-void RIterationInfo::printIteration(void) const
+void RIterationInfo::printIteration() const
 {
     if (this->outputFrequency == 0)
     {
@@ -184,7 +184,7 @@ void RIterationInfo::writeToFile(const QString &fileName, uint iteration, const 
     file.close();
 }
 
-void RIterationInfo::writeToFile(void) const
+void RIterationInfo::writeToFile() const
 {
     std::vector<RIterationInfoValue> cvgValues;
     cvgValues.push_back(RIterationInfoValue("Solver residual",this->error));

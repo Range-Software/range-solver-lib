@@ -38,28 +38,28 @@ class RHemiCubePixel
         RHemiCubePixel &operator =(const RHemiCubePixel &hemiCubePixel);
 
         //! Return const reference to pixel position.
-        const RR3Vector &getPosition(void) const;
+        const RR3Vector &getPosition() const;
 
         //! Return reference to pixel position.
-        RR3Vector &getPosition(void);
+        RR3Vector &getPosition();
 
         //! Set pixel position.
         void setPosition(const RR3Vector &position);
 
         //! Return pixel color.
-        uint getColor(void) const;
+        uint getColor() const;
 
         //! Set pixel color.
         void setColor(uint color);
 
         //! Return pixel depth.
-        double getDepth(void) const;
+        double getDepth() const;
 
         //! Set pixel depth.
         void setDepth(double depth);
 
         //! Return pixel weight.
-        double getWeight(void) const;
+        double getWeight() const;
 
         //! Set pixel weight.
         void setWeight(double weight);

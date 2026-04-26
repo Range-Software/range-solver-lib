@@ -103,7 +103,7 @@ RSolver::~RSolver()
     }
 }
 
-void RSolver::run(void)
+void RSolver::run()
 {
     RTimeSolver &timeSolver = this->pModel->getTimeSolver();
     timeSolver.harmonizeTimesWithInput(this->pModel->getProblemSetup().getRestart());
@@ -143,7 +143,7 @@ void RSolver::run(void)
     }
 }
 
-void RSolver::runSingle(void)
+void RSolver::runSingle()
 {
     this->runProblemTask(this->pModel->getProblemTaskTree(),0);
 }

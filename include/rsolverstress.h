@@ -51,42 +51,42 @@ class RSolverStress : public RSolverGeneric
         ~RSolverStress();
 
         //! Check if solver has converged.
-        bool hasConverged(void) const;
+        bool hasConverged() const;
 
     protected:
 
         //! Update scales.
-        void updateScales(void);
+        void updateScales();
 
         //! Recover previously computed results.
-        void recover(void);
+        void recover();
 
         //! Prepare solver.
-        void prepare(void);
+        void prepare();
 
         //! Run matrix solver.
-        void solve(void);
+        void solve();
 
         //! Solve stress-strain problem.
-        void solveStressStrain(void);
+        void solveStressStrain();
 
         //! Solve eigen-value problem.
-        void solveEigenValue(void);
+        void solveEigenValue();
 
         //! Set displacemen.
         void setDisplacement(const RRVector &v);
 
         //! Process solver results.
-        void process(void);
+        void process();
 
         //! Store solver results.
-        void store(void);
+        void store();
 
         //! Process statistics.
-        void statistics(void);
+        void statistics();
 
         //! Generate node book.
-        void generateNodeBook(void);
+        void generateNodeBook();
 
         //! Assembly matrix
         void assemblyMatrix(unsigned int elementID, const RRMatrix &Me, const RRMatrix &Ke, const RRVector &fe);

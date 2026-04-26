@@ -15,17 +15,17 @@ RSolverStress::~RSolverStress()
 
 }
 
-bool RSolverStress::hasConverged(void) const
+bool RSolverStress::hasConverged() const
 {
     return true;
 }
 
-void RSolverStress::updateScales(void)
+void RSolverStress::updateScales()
 {
     this->scales.setMetre(this->findMeshScale());
 }
 
-void RSolverStress::recover(void)
+void RSolverStress::recover()
 {
     this->recoverVariable(R_VARIABLE_DISPLACEMENT,R_VARIABLE_APPLY_NODE,this->pModel->getNNodes(),0,this->nodeDisplacement.x,0.0);
     this->recoverVariable(R_VARIABLE_DISPLACEMENT,R_VARIABLE_APPLY_NODE,this->pModel->getNNodes(),1,this->nodeDisplacement.y,0.0);
@@ -47,8 +47,10 @@ void RSolverStress::recover(void)
 //    this->syncShared("node-acceleration-z",this->nodeAcceleration.z);
 }
 
-void RSolverStress::prepare(void)
+void RSolverStress::prepare()
 {
+    const bool needsMass = this->pModel->getTimeSolver().getEnabled() || this->problemType == R_PROBLEM_STRESS_MODAL;
+
     //! Element displacement vector.
     struct { RRVector x, y, z, n; } elementDisplacement;
     struct { RBVector x, y, z, n; } displacementSetValues;
@@ -214,7 +216,7 @@ void RSolverStress::prepare(void)
                 }
 
                 // Mass
-                if (this->pModel->getTimeSolver().getEnabled() || this->problemType == R_PROBLEM_STRESS_MODAL)
+                if (needsMass)
                 {
                     Me.setIdentity(3);
                     Me *= this->elementDensity[elementID] * pointVolume;
@@ -309,7 +311,7 @@ void RSolverStress::prepare(void)
                         if (lineCrossArea > 0.0)
                         {
                             // Mass
-                            if (this->pModel->getTimeSolver().getEnabled() || this->problemType == R_PROBLEM_STRESS_MODAL)
+                            if (needsMass)
                             {
                                 for (uint n=0;n<element.size();n++)
                                 {
@@ -474,7 +476,7 @@ void RSolverStress::prepare(void)
                         if (surfaceThickness > 0.0)
                         {
                             // Mass
-                            if (this->pModel->getTimeSolver().getEnabled() || this->problemType == R_PROBLEM_STRESS_MODAL)
+                            if (needsMass)
                             {
                                 for (uint n=0;n<element.size();n++)
                                 {
@@ -532,7 +534,7 @@ void RSolverStress::prepare(void)
                     }
 
                     // Mass
-                    if (surfaceThickness > 0.0 && (this->pModel->getTimeSolver().getEnabled() || this->problemType == R_PROBLEM_STRESS_MODAL))
+                    if (surfaceThickness > 0.0 && needsMass)
                     {
                         RRMatrix::mlt(Rt,Met,MeRt);
                         RRMatrix::mlt(MeRt,RtT,Me,true);
@@ -661,7 +663,7 @@ void RSolverStress::prepare(void)
                         for (uint n=0;n<element.size();n++)
                         {
                             // Mass
-                            if (this->pModel->getTimeSolver().getEnabled() || this->problemType == R_PROBLEM_STRESS_MODAL)
+                            if (needsMass)
                             {
                                 double value = N[m] * N[n]
                                              * this->elementDensity[elementID]
@@ -717,7 +719,7 @@ void RSolverStress::prepare(void)
     }
 }
 
-void RSolverStress::solve(void)
+void RSolverStress::solve()
 {
     try
     {
@@ -736,7 +738,7 @@ void RSolverStress::solve(void)
     }
 }
 
-void RSolverStress::solveStressStrain(void)
+void RSolverStress::solveStressStrain()
 {
     RLogger::info("Solving stress-strain problem.\n");
 
@@ -756,7 +758,7 @@ void RSolverStress::solveStressStrain(void)
     this->setDisplacement(this->x);
 }
 
-void RSolverStress::solveEigenValue(void)
+void RSolverStress::solveEigenValue()
 {
     RLogger::info("Solving eigen-value problem.\n");
 
@@ -829,8 +831,10 @@ void RSolverStress::setDisplacement(const RRVector &v)
     }
 }
 
-void RSolverStress::process(void)
+void RSolverStress::process()
 {
+    const bool needsMass = this->pModel->getTimeSolver().getEnabled() || this->problemType == R_PROBLEM_STRESS_MODAL;
+
     if (this->problemType == R_PROBLEM_STRESS_MODAL)
     {
         uint modeNum = this->pModel->getProblemSetup().getModalSetup().getMode();
@@ -961,7 +965,7 @@ void RSolverStress::process(void)
                         if (lineCrossArea > 0.0)
                         {
                             // Mass
-                            if (this->pModel->getTimeSolver().getEnabled() || this->problemType == R_PROBLEM_STRESS_MODAL)
+                            if (needsMass)
                             {
                                 for (uint n=0;n<element.size();n++)
                                 {
@@ -1148,7 +1152,7 @@ void RSolverStress::process(void)
                     for (uint m=0;m<element.size();m++)
                     {
                         // Mass
-                        if (this->pModel->getTimeSolver().getEnabled() || this->problemType == R_PROBLEM_STRESS_MODAL)
+                        if (needsMass)
                         {
                             for (uint n=0;n<element.size();n++)
                             {
@@ -1164,7 +1168,7 @@ void RSolverStress::process(void)
                     }
 
                     // Mass
-                    if (this->pModel->getTimeSolver().getEnabled() || this->problemType == R_PROBLEM_STRESS_MODAL)
+                    if (needsMass)
                     {
                         RRMatrix::mlt(Rt,Met,MeRt);
                         RRMatrix::mlt(MeRt,RtT,Me,true);
@@ -1333,7 +1337,7 @@ void RSolverStress::process(void)
                         for (uint n=0;n<element.size();n++)
                         {
                             // Mass
-                            if (this->pModel->getTimeSolver().getEnabled() || this->problemType == R_PROBLEM_STRESS_MODAL)
+                            if (needsMass)
                             {
                                 double value = N[m] * N[n]
                                              * this->elementDensity[elementID]
@@ -1406,7 +1410,7 @@ void RSolverStress::process(void)
     }
 }
 
-void RSolverStress::store(void)
+void RSolverStress::store()
 {
     RLogger::info("Storing results\n");
     RLogger::indent();
@@ -1545,7 +1549,7 @@ void RSolverStress::store(void)
     RLogger::unindent();
 }
 
-void RSolverStress::statistics(void)
+void RSolverStress::statistics()
 {
     this->printStats(R_VARIABLE_DISPLACEMENT);
     this->printStats(R_VARIABLE_STRESS_VON_MISES);
@@ -1553,7 +1557,7 @@ void RSolverStress::statistics(void)
     this->processMonitoringPoints();
 }
 
-void RSolverStress::generateNodeBook(void)
+void RSolverStress::generateNodeBook()
 {
     this->nodeBook.resize(this->pModel->getNNodes()*3);
     this->nodeBook.initialize();
