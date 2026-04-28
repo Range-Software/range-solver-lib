@@ -17,6 +17,10 @@ bool RSolverMagnetostatics::hasConverged() const
     return true;
 }
 
+void RSolverMagnetostatics::initialize()
+{
+}
+
 void RSolverMagnetostatics::updateScales()
 {
 

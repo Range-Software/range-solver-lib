@@ -88,7 +88,7 @@ class RSolverGeneric
         virtual ~RSolverGeneric();
 
         //! Run solver.
-        void run(bool firstRun, uint taskIteration);
+        void run(bool firstExecution, uint taskIteration);
 
         //! Get mesh changed.
         bool getMeshChanged() const;
@@ -124,6 +124,9 @@ class RSolverGeneric
 
         //! Recover shared data.
         virtual void recoverSharedData();
+
+        //! Initialize.
+        virtual void initialize() = 0;
 
         //! Update scales.
         virtual void updateScales() = 0;

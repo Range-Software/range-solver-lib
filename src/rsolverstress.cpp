@@ -20,6 +20,10 @@ bool RSolverStress::hasConverged() const
     return true;
 }
 
+void RSolverStress::initialize()
+{
+}
+
 void RSolverStress::updateScales()
 {
     this->scales.setMetre(this->findMeshScale());

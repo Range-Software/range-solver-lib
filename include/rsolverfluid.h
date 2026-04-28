@@ -73,6 +73,9 @@ class RSolverFluid : public RSolverGeneric
         uint statsCounter;
         double statsOldResidual;
 
+        //! Guards the one-time warm-start of x on a restarted run.
+        bool xInitialized;
+
     public:
 
         //! Constructor.
@@ -85,6 +88,9 @@ class RSolverFluid : public RSolverGeneric
         bool hasConverged() const override;
 
     protected:
+
+        //! Initialize solver.
+        void initialize() override;
 
         //! Update scales.
         void updateScales() override;

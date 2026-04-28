@@ -77,6 +77,9 @@ class RSolverFluidHeat : public RSolverGeneric
         //! Generate node heat input vector.
         void generateNodeHeatVector();
 
+        //! Initialize solver.
+        void initialize() override;
+
         //! Update scales.
         void updateScales() override;
 

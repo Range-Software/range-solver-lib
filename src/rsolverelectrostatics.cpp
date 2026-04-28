@@ -17,6 +17,10 @@ bool RSolverElectrostatics::hasConverged() const
     return true;
 }
 
+void RSolverElectrostatics::initialize()
+{
+}
+
 void RSolverElectrostatics::updateScales()
 {
 

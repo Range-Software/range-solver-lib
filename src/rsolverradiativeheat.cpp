@@ -33,6 +33,10 @@ double RSolverRadiativeHeat::findTemperatureScale() const
     return 1.0;
 }
 
+void RSolverRadiativeHeat::initialize()
+{
+}
+
 void RSolverRadiativeHeat::updateScales()
 {
     this->scales.setMetre(this->findMeshScale());

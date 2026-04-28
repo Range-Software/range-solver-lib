@@ -119,6 +119,10 @@ void RSolverFluidHeat::generateNodeHeatVector()
     }
 }
 
+void RSolverFluidHeat::initialize()
+{
+}
+
 void RSolverFluidHeat::updateScales()
 {
     this->scales.setMetre(this->findMeshScale());

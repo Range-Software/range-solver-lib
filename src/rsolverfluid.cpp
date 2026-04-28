@@ -184,6 +184,7 @@ RSolverFluid::RSolverFluid(RModel *pModel, const QString &modelFileName, const Q
     , cvgP(0.0)
     , statsCounter(0)
     , statsOldResidual(0.0)
+    , xInitialized(false)
 {
     this->problemType = R_PROBLEM_FLUID;
     this->nodeAcceleration.x.resize(this->pModel->getNNodes(),0.0);
@@ -208,27 +209,29 @@ bool RSolverFluid::hasConverged() const
     return false;
 }
 
+void RSolverFluid::initialize()
+{
+    if (!this->xInitialized)
+    {
+        this->nodeVelocity.x.resize(this->pModel->getNNodes(),0.0);
+        this->nodeVelocity.y.resize(this->pModel->getNNodes(),0.0);
+        this->nodeVelocity.z.resize(this->pModel->getNNodes(),0.0);
+        this->elementVelocity.x.resize(this->pModel->getNElements(),0.0);
+        this->elementVelocity.y.resize(this->pModel->getNElements(),0.0);
+        this->elementVelocity.z.resize(this->pModel->getNElements(),0.0);
+        this->nodeAcceleration.x.resize(this->pModel->getNNodes(),0.0);
+        this->nodeAcceleration.y.resize(this->pModel->getNNodes(),0.0);
+        this->nodeAcceleration.z.resize(this->pModel->getNNodes(),0.0);
+        this->nodeVelocityOld.x.resize(this->pModel->getNNodes(),0.0);
+        this->nodeVelocityOld.y.resize(this->pModel->getNNodes(),0.0);
+        this->nodeVelocityOld.z.resize(this->pModel->getNNodes(),0.0);
+        this->elementPressure.resize(this->pModel->getNElements(),0.0);
+        this->xInitialized = true;
+    }
+}
+
 void RSolverFluid::updateScales()
 {
-    this->nodeVelocity.x.resize(this->pModel->getNNodes(),0.0);
-    this->nodeVelocity.y.resize(this->pModel->getNNodes(),0.0);
-    this->nodeVelocity.z.resize(this->pModel->getNNodes(),0.0);
-    this->elementVelocity.x.resize(this->pModel->getNElements(),0.0);
-    this->elementVelocity.y.resize(this->pModel->getNElements(),0.0);
-    this->elementVelocity.z.resize(this->pModel->getNElements(),0.0);
-    this->nodeAcceleration.x.resize(this->pModel->getNNodes(),0.0);
-    this->nodeAcceleration.y.resize(this->pModel->getNNodes(),0.0);
-    this->nodeAcceleration.z.resize(this->pModel->getNNodes(),0.0);
-    this->nodeVelocityOld.x.resize(this->pModel->getNNodes(),0.0);
-    this->nodeVelocityOld.y.resize(this->pModel->getNNodes(),0.0);
-    this->nodeVelocityOld.z.resize(this->pModel->getNNodes(),0.0);
-    this->elementPressure.resize(this->pModel->getNElements(),0.0);
-
-    if (this->taskIteration > 0)
-    {
-        return;
-    }
-
     RRVector eRo;
     RRVector eU;
 

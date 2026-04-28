@@ -22,6 +22,10 @@ double RSolverHeat::findTemperatureScale() const
     return 1.0;
 }
 
+void RSolverHeat::initialize()
+{
+}
+
 void RSolverHeat::updateScales()
 {
     this->scales.setMetre(this->findMeshScale());

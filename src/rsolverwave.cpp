@@ -16,6 +16,10 @@ bool RSolverWave::hasConverged() const
     return true;
 }
 
+void RSolverWave::initialize()
+{
+}
+
 void RSolverWave::updateScales()
 {
 

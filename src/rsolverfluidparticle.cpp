@@ -87,6 +87,10 @@ void RSolverFluidParticle::generateNodeRateVector()
     this->pModel->convertElementToNodeVector(this->elementRate,rateSetValues,this->nodeRate,true);
 }
 
+void RSolverFluidParticle::initialize()
+{
+}
+
 void RSolverFluidParticle::updateScales()
 {
 

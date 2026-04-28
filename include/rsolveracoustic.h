@@ -43,6 +43,9 @@ class RSolverAcoustic : public RSolverGeneric
 
         double findSoundSpeedScale() const;
 
+        //! Initialize solver.
+        void initialize() override;
+
         //! Update scales.
         void updateScales();
 

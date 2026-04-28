@@ -194,12 +194,12 @@ bool RSolver::runProblemTask(const RProblemTaskItem &problemTaskItem, uint taskI
             }
             uint executionCount = this->solversExecutionCount[problemType];
 
-            bool firstRun = (executionCount == 0 && !this->pModel->getProblemSetup().getRestart());
+            bool firstExecution = (executionCount == 0);
 
             RLogger::info("Solving problem task: %s\n",RProblem::getName(problemTaskItem.getProblemType()).toUtf8().constData());
             RLogger::indent();
 
-            this->solvers[problemType]->run(firstRun,taskIteration);
+            this->solvers[problemType]->run(firstExecution,taskIteration);
             converged = this->solvers[problemTaskItem.getProblemType()]->hasConverged();
             if (this->solvers[problemTaskItem.getProblemType()]->getMeshChanged())
             {

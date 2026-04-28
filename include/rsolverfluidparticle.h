@@ -70,6 +70,9 @@ class RSolverFluidParticle : public RSolverGeneric
         //! Generate node rate input vector.
         void generateNodeRateVector();
 
+        //! Initialize solver.
+        void initialize() override;
+
         //! Update scales.
         void updateScales() override;
 

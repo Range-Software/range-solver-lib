@@ -33,9 +33,9 @@ RSolverGeneric::~RSolverGeneric()
 
 }
 
-void RSolverGeneric::run(bool firstRun, uint taskIteration)
+void RSolverGeneric::run(bool firstExecution, uint taskIteration)
 {
-    this->firstRun = firstRun;
+    this->firstRun = firstExecution && !this->pModel->getProblemSetup().getRestart();
     this->taskIteration = taskIteration;
 
     this->elementTemperature.resize(this->pModel->getNElements(),RVariable::getInitValue(R_VARIABLE_TEMPERATURE));
@@ -55,6 +55,7 @@ void RSolverGeneric::run(bool firstRun, uint taskIteration)
         this->updateScales();
         this->scales.downscale(*this->pModel);
 
+        this->initialize();
         this->recoverSharedData();
         this->recover();
         this->prepare();
@@ -102,7 +103,7 @@ void RSolverGeneric::run(bool firstRun, uint taskIteration)
             this->applyDisplacement();
         }
 
-        if (this->firstRun || this->problemType == R_PROBLEM_MESH)
+        if (firstExecution || this->problemType == R_PROBLEM_MESH)
         {
             this->updateScales();
         }
@@ -111,6 +112,7 @@ void RSolverGeneric::run(bool firstRun, uint taskIteration)
             this->scales.downscale(*this->pModel);
         }
 
+        this->initialize();
         this->recoverSharedData();
         this->recover();
         this->prepare();
@@ -439,8 +441,7 @@ void RSolverGeneric::writeResults()
     if (this->pModel->getTimeSolver().getEnabled())
     {
         canWrite = false;
-        if (/*(!this->pModel->getTimeSolver().getRestartSolver() && this->pModel->getTimeSolver().getCurrentTimeStep() == 0) ||*/
-            (this->pModel->getTimeSolver().getCurrentTimeStep()+1) == this->pModel->getTimeSolver().getNTimeSteps() ||
+        if ((this->pModel->getTimeSolver().getCurrentTimeStep()+1) == this->pModel->getTimeSolver().getNTimeSteps() ||
             ((this->pModel->getTimeSolver().getCurrentTimeStep()+1) % this->pModel->getTimeSolver().getOutputFrequency() == 0))
         {
             canWrite = true;

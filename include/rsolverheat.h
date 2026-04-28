@@ -43,6 +43,9 @@ class RSolverHeat : public RSolverGeneric
         //! Find temperature scale.
         double findTemperatureScale() const;
 
+        //! Initialize solver.
+        void initialize() override;
+
         //! Update scales.
         void updateScales();
 

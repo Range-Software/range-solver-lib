@@ -20,6 +20,10 @@ bool RSolverMesh::hasConverged() const
     return true;
 }
 
+void RSolverMesh::initialize()
+{
+}
+
 void RSolverMesh::updateScales()
 {
 

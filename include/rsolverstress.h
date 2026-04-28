@@ -55,6 +55,9 @@ class RSolverStress : public RSolverGeneric
 
     protected:
 
+        //! Initialize solver.
+        void initialize() override;
+
         //! Update scales.
         void updateScales();
 

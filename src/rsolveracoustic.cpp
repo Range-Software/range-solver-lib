@@ -49,6 +49,10 @@ double RSolverAcoustic::findSoundSpeedScale() const
     return 1.0 / cavg;
 }
 
+void RSolverAcoustic::initialize()
+{
+}
+
 void RSolverAcoustic::updateScales()
 {
 //    double sScale = this->findSoundSpeedScale();
