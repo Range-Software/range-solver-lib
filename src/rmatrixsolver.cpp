@@ -324,6 +324,7 @@ void RMatrixSolver::solveGMRES(const RSparseMatrix &A, const RRVector &b, RRVect
                 beta = 0.0;
                 xn = 0.0;
             }
+#pragma omp barrier
 #pragma omp for reduction(+:xn,beta)
             for (int64_t i=0;i<int64_t(mA);i++)
             {
