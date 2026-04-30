@@ -1,6 +1,31 @@
 ---------------------------------------------------------------------------------
 Version 1.0.0
 
+- RSparseVector::addValue(): linear search (std::find) and full re-sort on every
+  new entry replaced with binary search (std::lower_bound) and a single sorted
+  insert, reducing per-call complexity from O(n log n) to O(log n + n) while
+  keeping the vector sorted.
+- RSparseVector::addVector(): loop of per-entry addValue() calls replaced with a
+  two-pointer O(n+m) sorted merge; eliminates the dominant cost in the per-thread
+  matrix reduction loop in all solvers.
+- RSolverFluid::prepare(): Ae/be element matrices lifted into FluidMatrixContainer
+  as thread-local storage, eliminating a heap allocation and deallocation for every
+  element on every assembly pass.
+- RSolverFluid::prepare(): four sequential convertNodeToElementVector calls
+  replaced with a single OpenMP parallel loop, reducing four element traversals
+  to one.
+- RSolverFluid::prepare(): bool abort flag with #pragma omp flush replaced by
+  std::atomic<bool> with memory_order_relaxed, removing explicit memory barriers
+  from the check at the top of every element iteration.
+- RSolverFluid::prepare(): std::pow(x, 2) in surface-element gravity-magnitude
+  calculation replaced with direct multiplication.
+- RSolverGeneric::findInwardElements(): O(N_surfaces x N_elements) nested scan
+  replaced with a pre-built node-to-volume-element index constructed in one
+  O(N_elements) pass, reducing the per-surface-element search from O(N_elements)
+  to O(local_node_degree).
+- RSolverGeneric::processMonitoringPoints(): missing break added after the
+  containing element is found, stopping the O(N_elements) isInside() scan as
+  soon as the result is known.
 - RHemiCubeSector: limitBox (bounding box of the limit polygon) is now cached at
   construction time instead of being recomputed on every testVisibility() call.
 - RHemiCube::calculateViewFactors(): element triangulations are pre-computed once

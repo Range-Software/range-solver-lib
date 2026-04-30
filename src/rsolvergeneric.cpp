@@ -840,6 +840,25 @@ void RSolverGeneric::findInwardElements()
     this->inwardElements.resize(this->pModel->getNElements());
     this->inwardElements.fill(false);
 
+    // Build node → computable volume element index to avoid O(N²) search below.
+    std::vector<std::vector<uint>> nodeToVolElems(this->pModel->getNNodes());
+    for (uint l=0;l<this->pModel->getNElements();l++)
+    {
+        if (!this->computableElements[l])
+        {
+            continue;
+        }
+        const RElement &rEl = this->pModel->getElement(l);
+        if (!R_ELEMENT_TYPE_IS_VOLUME(rEl.getType()))
+        {
+            continue;
+        }
+        for (uint m=0;m<rEl.size();m++)
+        {
+            nodeToVolElems[rEl.getNodeId(m)].push_back(l);
+        }
+    }
+
     // Assuming that surface normals are synchronized.
 
     for (uint i=0;i<this->pModel->getNSurfaces();i++)
@@ -857,29 +876,23 @@ void RSolverGeneric::findInwardElements()
                 continue;
             }
             const RElement &rElement = this->pModel->getElement(elementID);
-            // Find related volume element.
-            for (uint l=0;l<this->pModel->getNElements();l++)
+            // Find related volume element via node index (O(degree) instead of O(N_elements)).
+            const std::vector<uint> &candidates = nodeToVolElems[rElement.getNodeId(0)];
+            for (uint l : candidates)
             {
-                if (!this->computableElements[l])
-                {
-                    continue;
-                }
                 const RElement &rVolumeElement = this->pModel->getElement(l);
-                if (R_ELEMENT_TYPE_IS_VOLUME(rVolumeElement.getType()))
+                uint nNodesFound = 0;
+                for (uint m=0;m<rElement.size();m++)
                 {
-                    uint nNodesFound = 0;
-                    for (uint m=0;m<rElement.size();m++)
+                    if (rVolumeElement.hasNodeId(rElement.getNodeId(m)))
                     {
-                        if (rVolumeElement.hasNodeId(rElement.getNodeId(m)))
-                        {
-                            nNodesFound++;
-                        }
+                        nNodesFound++;
                     }
-                    if (nNodesFound == rElement.size())
-                    {
-                        volumeElementID = l;
-                        break;
-                    }
+                }
+                if (nNodesFound == rElement.size())
+                {
+                    volumeElementID = l;
+                    break;
                 }
             }
             if (volumeElementID != RConstants::eod)
@@ -946,6 +959,7 @@ void RSolverGeneric::processMonitoringPoints() const
             if (this->pModel->getElement(j).isInside(this->pModel->getNodes(),iNode))
             {
                 elementID = j;
+                break;
             }
         }
         if (elementID == RConstants::eod)
