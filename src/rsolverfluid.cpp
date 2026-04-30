@@ -346,9 +346,11 @@ void RSolverFluid::prepare()
     RBVector elementFreePressureSetValues;
     this->computeElementFreePressure(elementFreePressure,elementFreePressureSetValues);
 
-    this->A.clear();
-    this->A.setNRows(this->nodeBook.getNEnabled());
-    this->A.reserveNColumns(100);
+    if (this->taskIteration == 0 || this->meshChanged)
+    {
+        this->buildSparseMatrixPattern(elementFreePressureSetValues);
+    }
+    this->A.fillValues(0.0);
     this->b.resize(this->nodeBook.getNEnabled());
     this->b.fill(0.0);
     this->x.resize(this->nodeBook.getNEnabled());
@@ -363,8 +365,8 @@ void RSolverFluid::prepare()
 
     for (int i=0;i<np;i++)
     {
-        Ap[i].setNRows(this->nodeBook.getNEnabled());
-        Ap[i].reserveNColumns(100);
+        Ap[i] = this->A;
+        Ap[i].fillValues(0.0);
         bp[i].resize(this->nodeBook.getNEnabled());
         bp[i].fill(0.0);
     }
@@ -478,7 +480,7 @@ void RSolverFluid::prepare()
     {
         for (int j=0;j<np;j++)
         {
-            A.getVector(uint(i)).addVector(Ap[j].getVector(uint(i)));
+            A.getVector(uint(i)).addVectorValues(Ap[j].getVector(uint(i)));
             this->b[uint(i)] += bp[j][uint(i)];
         }
     }
@@ -1855,52 +1857,6 @@ void RSolverFluid::computeElementConstantDerivative(unsigned int elementID, RRMa
     be.fill(0.0);
 
     FluidMatrixContainer &matrixCotainer = matrixManager.getMatricies(element.getType());
-    matrixCotainer.clear();
-
-    // Element level matricies
-    RRMatrix &me = matrixCotainer.me;
-    RRMatrix &ce = matrixCotainer.ce;
-    RRMatrix &ke = matrixCotainer.ke;
-    RRMatrix &ge = matrixCotainer.ge;
-    RRMatrix &geT = matrixCotainer.geT;
-    RRMatrix &cpe = matrixCotainer.cpe;
-    RRMatrix &cte = matrixCotainer.cte;
-    RRMatrix &ctpe = matrixCotainer.ctpe;
-    RRMatrix &kte = matrixCotainer.kte;
-    RRMatrix &ktpe = matrixCotainer.ktpe;
-    RRMatrix &ktppe = matrixCotainer.ktppe;
-    RRMatrix &yte = matrixCotainer.yte;
-    RRMatrix &ytpe = matrixCotainer.ytpe;
-    RRMatrix &bte = matrixCotainer.bte;
-    RRMatrix &ye = matrixCotainer.ye;
-    RRMatrix &ype = matrixCotainer.ype;
-    RRMatrix &the = matrixCotainer.the;
-    RRMatrix &epe = matrixCotainer.epe;
-
-    // Element level vectors
-    RRVector &fv = matrixCotainer.fv;
-    RRVector &ftv = matrixCotainer.ftv;
-    RRVector &etv = matrixCotainer.etv;
-    RRVector &mv = matrixCotainer.mv;
-    RRVector &cv = matrixCotainer.cv;
-    RRVector &kv = matrixCotainer.kv;
-    RRVector &gv = matrixCotainer.gv;
-    RRVector &gvT = matrixCotainer.gvT;
-    RRVector &ctv = matrixCotainer.ctv;
-    RRVector &ktv = matrixCotainer.ktv;
-    RRVector &ytv = matrixCotainer.ytv;
-    RRVector &btv = matrixCotainer.btv;
-    RRVector &yv = matrixCotainer.yv;
-    RRVector &thv = matrixCotainer.thv;
-    RRVector &ev = matrixCotainer.ev;
-
-    // Element level equations
-    RRMatrix &Ae11 = matrixCotainer.Ae11;
-    RRMatrix &Ae12 = matrixCotainer.Ae12;
-    RRMatrix &Ae21 = matrixCotainer.Ae21;
-    RRMatrix &Ae22 = matrixCotainer.Ae22;
-    RRVector &be1 = matrixCotainer.be1;
-    RRVector &be2 = matrixCotainer.be2;
 
     double mVh = this->streamVelocity;
     double invmVh = this->invStreamVelocity;
@@ -2019,351 +1975,224 @@ void RSolverFluid::computeElementConstantDerivative(unsigned int elementID, RRMa
     // LSIC stabilization parameter
     double Tlsic = mvh*h * 0.5;
 
-    double value = 0.0;
+    const double veVex0 = ve[0]*vex[0] + ve[1]*vey[0] + ve[2]*vez[0];
+    const double veVex1 = ve[0]*vex[1] + ve[1]*vey[1] + ve[2]*vez[1];
+    const double veVex2 = ve[0]*vex[2] + ve[1]*vey[2] + ve[2]*vez[2];
+    const double divV = vex[0] + vey[1] + vez[2];
+
     for (uint m=0;m<nen;m++)
     {
-        uint64_t m3 = m*3;
+        uint64_t m4 = m*4;
+        const double Bm0 = B[m][0];
+        const double Bm1 = B[m][1];
+        const double Bm2 = B[m][2];
+        const double iNm = iN[m];
+        const double vdivm = vdiv[m];
+
         for (uint n=0;n<nen;n++)
         {
-            uint64_t n3 = n*3;
+            uint64_t n4 = n*4;
+            const double Bn0 = B[n][0];
+            const double Bn1 = B[n][1];
+            const double Bn2 = B[n][2];
+            const double iNn = iN[n];
+            const double iNiNmn = iNiN[m][n];
 
-            double B00 = B[m][0]*B[n][0];
-            double B01 = B[m][0]*B[n][1];
-            double B02 = B[m][0]*B[n][2];
-            double B10 = B[m][1]*B[n][0];
-            double B11 = B[m][1]*B[n][1];
-            double B12 = B[m][1]*B[n][2];
-            double B20 = B[m][2]*B[n][0];
-            double B21 = B[m][2]*B[n][1];
-            double B22 = B[m][2]*B[n][2];
+            const double B00 = Bm0*Bn0;
+            const double B01 = Bm0*Bn1;
+            const double B02 = Bm0*Bn2;
+            const double B10 = Bm1*Bn0;
+            const double B11 = Bm1*Bn1;
+            const double B12 = Bm1*Bn2;
+            const double B20 = Bm2*Bn0;
+            const double B21 = Bm2*Bn1;
+            const double B22 = Bm2*Bn2;
+            const double tmpValue = B00 + B11 + B22;
 
-            // m matrix
+            double a00 = 0.0;
+            double a01 = 0.0;
+            double a02 = 0.0;
+            double a10 = 0.0;
+            double a11 = 0.0;
+            double a12 = 0.0;
+            double a20 = 0.0;
+            double a21 = 0.0;
+            double a22 = 0.0;
+
             if (unsteady)
             {
-                value = ro * iNiN[m][n];
-                me[m3+0][n3+0] = value;
-                me[m3+1][n3+1] = value;
-                me[m3+2][n3+2] = value;
+                const double mass = ro * iNiNmn;
+                const double ctilde = Tsupg * ro * vdivm * iNn;
+                const double ctpeScale = Tsupg * ro * iNn;
+                a00 += mass + ctilde + alphaDt * (ctpeScale * Bm0 * ax[n]);
+                a10 +=                     alphaDt * (ctpeScale * Bm0 * ay[n]);
+                a20 +=                     alphaDt * (ctpeScale * Bm0 * az[n]);
+                a01 +=                     alphaDt * (ctpeScale * Bm1 * ax[n]);
+                a11 += mass + ctilde + alphaDt * (ctpeScale * Bm1 * ay[n]);
+                a21 +=                     alphaDt * (ctpeScale * Bm1 * az[n]);
+                a02 +=                     alphaDt * (ctpeScale * Bm2 * ax[n]);
+                a12 +=                     alphaDt * (ctpeScale * Bm2 * ay[n]);
+                a22 += mass + ctilde + alphaDt * (ctpeScale * Bm2 * az[n]);
             }
-            // c matrix
-            value = ro * iN[m] * vdiv[n];
-            ce[m3+0][n3+0] = value;
-            ce[m3+1][n3+1] = value;
-            ce[m3+2][n3+2] = value;
-            // k matrix
-            value = ro * u * wt;
-            double tmpValue = B00 + B11 + B22;
-            ke[m3+0][n3+0] = value * (tmpValue + B00);
-            ke[m3+1][n3+0] = value * (           B01);
-            ke[m3+2][n3+0] = value * (           B02);
-            ke[m3+0][n3+1] = value * (           B10);
-            ke[m3+1][n3+1] = value * (tmpValue + B11);
-            ke[m3+2][n3+1] = value * (           B12);
-            ke[m3+0][n3+2] = value * (           B20);
-            ke[m3+1][n3+2] = value * (           B21);
-            ke[m3+2][n3+2] = value * (tmpValue + B22);
-            // g matrix
-            ge[m3+0][n] = B[m][0] * iN[n];
-            ge[m3+1][n] = B[m][1] * iN[n];
-            ge[m3+2][n] = B[m][2] * iN[n];
-            // gT matrix
-            geT[n][m3+0] = ge[m3+0][n];
-            geT[n][m3+1] = ge[m3+1][n];
-            geT[n][m3+2] = ge[m3+2][n];
-            // c+ matrix
-            value = ro * iNiN[m][n];
-            cpe[m3+0][n3+0] = value * vex[0];
-            cpe[m3+0][n3+1] = value * vey[0];
-            cpe[m3+0][n3+2] = value * vez[0];
-            cpe[m3+1][n3+0] = value * vex[1];
-            cpe[m3+1][n3+1] = value * vey[1];
-            cpe[m3+1][n3+2] = value * vez[1];
-            cpe[m3+2][n3+0] = value * vex[2];
-            cpe[m3+2][n3+1] = value * vey[2];
-            cpe[m3+2][n3+2] = value * vez[2];
-            // c~ matrix
+
+            const double ce = ro * iNm * vdiv[n];
+            a00 += unsteady ? alphaDt * ce : ce;
+            a11 += unsteady ? alphaDt * ce : ce;
+            a22 += unsteady ? alphaDt * ce : ce;
+
+            const double kScale = ro * u * wt;
+            const double k00 = kScale * (tmpValue + B00);
+            const double k10 = kScale * B01;
+            const double k20 = kScale * B02;
+            const double k01 = kScale * B10;
+            const double k11 = kScale * (tmpValue + B11);
+            const double k21 = kScale * B12;
+            const double k02 = kScale * B20;
+            const double k12 = kScale * B21;
+            const double k22 = kScale * (tmpValue + B22);
+
+            const double cpeScale = ro * iNiNmn;
+            const double cpe00 = cpeScale * vex[0];
+            const double cpe01 = cpeScale * vey[0];
+            const double cpe02 = cpeScale * vez[0];
+            const double cpe10 = cpeScale * vex[1];
+            const double cpe11 = cpeScale * vey[1];
+            const double cpe12 = cpeScale * vez[1];
+            const double cpe20 = cpeScale * vex[2];
+            const double cpe21 = cpeScale * vey[2];
+            const double cpe22 = cpeScale * vez[2];
+
+            const double kte = Tsupg * ro * vdivm * vdiv[n] * wt;
+            const double ktpeScale = Tsupg * ro * vdivm * iNn;
+            const double ktppeScale = Tsupg * ro * iNn;
+            const double ytpeScale = Tsupg * iNn;
+            const double epeScale = Tlsic * ro * wt;
+
+            const double steady00 = cpe00 + k00 + kte + ktpeScale * vex[0] + ktppeScale * Bm0 * veVex0 + ytpeScale * Bm0 * px + B00 * epeScale;
+            const double steady01 = cpe01 + k01       + ktpeScale * vey[0] + ktppeScale * Bm1 * veVex0 + ytpeScale * Bm1 * px + B01 * epeScale;
+            const double steady02 = cpe02 + k02       + ktpeScale * vez[0] + ktppeScale * Bm2 * veVex0 + ytpeScale * Bm2 * px + B02 * epeScale;
+            const double steady10 = cpe10 + k10       + ktpeScale * vex[1] + ktppeScale * Bm0 * veVex1 + ytpeScale * Bm0 * py + B10 * epeScale;
+            const double steady11 = cpe11 + k11 + kte + ktpeScale * vey[1] + ktppeScale * Bm1 * veVex1 + ytpeScale * Bm1 * py + B11 * epeScale;
+            const double steady12 = cpe12 + k12       + ktpeScale * vez[1] + ktppeScale * Bm2 * veVex1 + ytpeScale * Bm2 * py + B12 * epeScale;
+            const double steady20 = cpe20 + k20       + ktpeScale * vex[2] + ktppeScale * Bm0 * veVex2 + ytpeScale * Bm0 * pz + B20 * epeScale;
+            const double steady21 = cpe21 + k21       + ktpeScale * vey[2] + ktppeScale * Bm1 * veVex2 + ytpeScale * Bm1 * pz + B21 * epeScale;
+            const double steady22 = cpe22 + k22 + kte + ktpeScale * vez[2] + ktppeScale * Bm2 * veVex2 + ytpeScale * Bm2 * pz + B22 * epeScale;
+
             if (unsteady)
             {
-                value = Tsupg * ro * vdiv[m] * iN[n];
-                cte[m3+0][n3+0] = value;
-                cte[m3+1][n3+1] = value;
-                cte[m3+2][n3+2] = value;
-            }
-            // c~+ matrix
-            if (unsteady)
-            {
-                value = Tsupg * ro * iN[n];
-                ctpe[m3+0][n3+0] = value * B[m][0] * ax[n];
-                ctpe[m3+1][n3+0] = value * B[m][0] * ay[n];
-                ctpe[m3+2][n3+0] = value * B[m][0] * az[n];
-                ctpe[m3+0][n3+1] = value * B[m][1] * ax[n];
-                ctpe[m3+1][n3+1] = value * B[m][1] * ay[n];
-                ctpe[m3+2][n3+1] = value * B[m][1] * az[n];
-                ctpe[m3+0][n3+2] = value * B[m][2] * ax[n];
-                ctpe[m3+1][n3+2] = value * B[m][2] * ay[n];
-                ctpe[m3+2][n3+2] = value * B[m][2] * az[n];
-            }
-            // k~ matrix
-            value = Tsupg * ro * vdiv[m] * vdiv[n] * wt;
-            kte[m3+0][n3+0] = value;
-            kte[m3+1][n3+1] = value;
-            kte[m3+2][n3+2] = value;
-            // k~+ matrix
-            value = Tsupg * ro * vdiv[m] * iN[n];
-            ktpe[m3+0][n3+0] = value * vex[0];
-            ktpe[m3+0][n3+1] = value * vey[0];
-            ktpe[m3+0][n3+2] = value * vez[0];
-            ktpe[m3+1][n3+0] = value * vex[1];
-            ktpe[m3+1][n3+1] = value * vey[1];
-            ktpe[m3+1][n3+2] = value * vez[1];
-            ktpe[m3+2][n3+0] = value * vex[2];
-            ktpe[m3+2][n3+1] = value * vey[2];
-            ktpe[m3+2][n3+2] = value * vez[2];
-            // k~++ matrix
-            value = Tsupg * ro * iN[n];
-            ktppe[m3+0][n3+0] = value * B[m][0] * (ve[0]*vex[0] + ve[1]*vey[0] + ve[2]*vez[0]);
-            ktppe[m3+0][n3+1] = value * B[m][1] * (ve[0]*vex[0] + ve[1]*vey[0] + ve[2]*vez[0]);
-            ktppe[m3+0][n3+2] = value * B[m][2] * (ve[0]*vex[0] + ve[1]*vey[0] + ve[2]*vez[0]);
-
-            ktppe[m3+1][n3+0] = value * B[m][0] * (ve[0]*vex[1] + ve[1]*vey[1] + ve[2]*vez[1]);
-            ktppe[m3+1][n3+1] = value * B[m][1] * (ve[0]*vex[1] + ve[1]*vey[1] + ve[2]*vez[1]);
-            ktppe[m3+1][n3+2] = value * B[m][2] * (ve[0]*vex[1] + ve[1]*vey[1] + ve[2]*vez[1]);
-
-            ktppe[m3+2][n3+0] = value * B[m][0] * (ve[0]*vex[2] + ve[1]*vey[2] + ve[2]*vez[2]);
-            ktppe[m3+2][n3+1] = value * B[m][1] * (ve[0]*vex[2] + ve[1]*vey[2] + ve[2]*vez[2]);
-            ktppe[m3+2][n3+2] = value * B[m][2] * (ve[0]*vex[2] + ve[1]*vey[2] + ve[2]*vez[2]);
-            // y~ matrix
-            value = Tsupg * vdiv[m] * wt;
-            yte[m3+0][n] = value * B[n][0];
-            yte[m3+1][n] = value * B[n][1];
-            yte[m3+2][n] = value * B[n][2];
-            // y~+ matrix
-            value = Tsupg * iN[n];
-            ytpe[m3+0][n3+0] = value * B[m][0] * px;
-            ytpe[m3+0][n3+1] = value * B[m][1] * px;
-            ytpe[m3+0][n3+2] = value * B[m][2] * px;
-            ytpe[m3+1][n3+0] = value * B[m][0] * py;
-            ytpe[m3+1][n3+1] = value * B[m][1] * py;
-            ytpe[m3+1][n3+2] = value * B[m][2] * py;
-            ytpe[m3+2][n3+0] = value * B[m][0] * pz;
-            ytpe[m3+2][n3+1] = value * B[m][1] * pz;
-            ytpe[m3+2][n3+2] = value * B[m][2] * pz;
-            // B matrix
-            value = Tpspg * iN[n];
-            bte[m][n3+0] = value * B[m][0];
-            bte[m][n3+1] = value * B[m][1];
-            bte[m][n3+2] = value * B[m][2];
-            // y matrix
-            value = Tpspg * vdiv[n] * wt;
-            ye[m][n3+0] = value * B[m][0];
-            ye[m][n3+1] = value * B[m][1];
-            ye[m][n3+2] = value * B[m][2];
-            // y+ matrix
-            value = Tpspg * iN[n];
-            ype[m][n3+0] = value * (B[m][0]*vex[0] + B[m][1]*vex[1] + B[m][2]*vex[2]);
-            ype[m][n3+1] = value * (B[m][0]*vey[0] + B[m][1]*vey[1] + B[m][2]*vey[2]);
-            ype[m][n3+2] = value * (B[m][0]*vez[0] + B[m][1]*vez[1] + B[m][2]*vez[2]);
-            // 0 matrix
-            the[m][n] = Tpspg * ((B00 + B11 + B22) * invro) * wt;
-            // ep matrix
-            value = Tlsic * ro * wt;
-            epe[m3+0][n3+0] = B00 * value;
-            epe[m3+0][n3+1] = B01 * value;
-            epe[m3+0][n3+2] = B02 * value;
-            epe[m3+1][n3+0] = B10 * value;
-            epe[m3+1][n3+1] = B11 * value;
-            epe[m3+1][n3+2] = B12 * value;
-            epe[m3+2][n3+0] = B20 * value;
-            epe[m3+2][n3+1] = B21 * value;
-            epe[m3+2][n3+2] = B22 * value;
-        }
-        // m vector
-        if (unsteady)
-        {
-            value = iN[m] * ro;
-            mv[m3+0] = value * ax[m];
-            mv[m3+1] = value * ay[m];
-            mv[m3+2] = value * az[m];
-        }
-        // c vector
-        value = iN[m] * ro;
-        cv[m3+0] = value * (ve[0]*vex[0] + ve[1]*vey[0] + ve[2]*vez[0]);
-        cv[m3+1] = value * (ve[0]*vex[1] + ve[1]*vey[1] + ve[2]*vez[1]);
-        cv[m3+2] = value * (ve[0]*vex[2] + ve[1]*vey[2] + ve[2]*vez[2]);
-        // k vector
-        kv[m3+0] = u * (  B[m][0]*vex[0] + B[m][1]*vey[0] + B[m][2]*vez[0]
-                        + B[m][0]*vex[0] + B[m][1]*vex[1] + B[m][2]*vex[2]) * wt;
-        kv[m3+1] = u * (  B[m][0]*vex[1] + B[m][1]*vey[1] + B[m][2]*vez[1]
-                        + B[m][0]*vey[0] + B[m][1]*vey[1] + B[m][2]*vey[2]) * wt;
-        kv[m3+2] = u * (  B[m][0]*vex[2] + B[m][1]*vey[2] + B[m][2]*vez[2]
-                        + B[m][0]*vez[0] + B[m][1]*vez[1] + B[m][2]*vez[2]) * wt;
-        // g vector
-        value = p * wt;
-        gv[m3+0] = B[m][0] * value;
-        gv[m3+1] = B[m][1] * value;
-        gv[m3+2] = B[m][2] * value;
-        // gT vector
-        gvT[m] = iN[m] * (vex[0] + vey[1] + vez[2]);
-        // c~ vector
-        if (unsteady)
-        {
-            value = Tsupg * ro * vdiv[m] * wt;
-            ctv[m3+0] = value * ax[m];
-            ctv[m3+1] = value * ay[m];
-            ctv[m3+2] = value * az[m];
-        }
-        // k~ vector
-        value = Tsupg * ro * vdiv[m] * wt;
-        ktv[m3+0] = value * (ve[0]*vex[0] + ve[1]*vey[0] + ve[2]*vez[0]);
-        ktv[m3+1] = value * (ve[0]*vex[1] + ve[1]*vey[1] + ve[2]*vez[1]);
-        ktv[m3+2] = value * (ve[0]*vex[2] + ve[1]*vey[2] + ve[2]*vez[2]);
-        // y~ vector
-        value = Tsupg * vdiv[m] * wt;
-        ytv[m3+0] = value * px;
-        ytv[m3+1] = value * py;
-        ytv[m3+2] = value * pz;
-        // B vector
-        if (unsteady)
-        {
-            btv[m] = Tpspg * (B[m][0]*ax[m] + B[m][1]*ay[m] + B[m][2]*az[m]) * wt;
-        }
-        // y vector
-        yv[m] = Tpspg * (  B[m][0] * (ve[0]*vex[0] + ve[1]*vey[0] + ve[2]*vez[0])
-                         + B[m][1] * (ve[0]*vex[1] + ve[1]*vey[1] + ve[2]*vez[1])
-                         + B[m][2] * (ve[0]*vex[2] + ve[1]*vey[2] + ve[2]*vez[2])) * wt;
-        // 0 vector
-        thv[m] = Tpspg * ((B[m][0]*px + B[m][1]*py + B[m][2]*pz) * invro) * wt;
-        // e vector
-        value = Tlsic * ro * (vex[0] + vey[1] + vez[2]) * wt;
-        ev[m3+0] = value * B[m][0];
-        ev[m3+1] = value * B[m][1];
-        ev[m3+2] = value * B[m][2];
-        // f vector
-        value = ro * iN[m];
-        fv[m3+0] = value * g[0];
-        fv[m3+1] = value * g[1];
-        fv[m3+2] = value * g[2];
-        // f~ vector
-        value = Tsupg * ro * vdiv[m] * wt;
-        ftv[m3+0] = value * g[0];
-        ftv[m3+1] = value * g[1];
-        ftv[m3+2] = value * g[2];
-        // e~ vector
-        etv[m] = Tpspg * (B[m][0]*g[0] + B[m][1]*g[1] + B[m][2]*g[2]) * wt;
-    }
-
-    // Assembly element level matrixes
-    for (uint m=0;m<nen*3;m++)
-    {
-        for (uint n=0;n<nen*3;n++)
-        {
-            if (unsteady)
-            {
-                Ae11[m][n] = me[m][n] + cte[m][n]
-                           + alphaDt * (
-                                          ce[m][n]    + cpe[m][n]
-                                        + ctpe[m][n]  + ke[m][n]
-                                        + kte[m][n]   + ktpe[m][n]
-                                        + ktppe[m][n] + ytpe[m][n] )
-                           + dt * epe[m][n];
+                a00 += alphaDt * (steady00 - B00 * epeScale) + dt * B00 * epeScale;
+                a01 += alphaDt * (steady01 - B01 * epeScale) + dt * B01 * epeScale;
+                a02 += alphaDt * (steady02 - B02 * epeScale) + dt * B02 * epeScale;
+                a10 += alphaDt * (steady10 - B10 * epeScale) + dt * B10 * epeScale;
+                a11 += alphaDt * (steady11 - B11 * epeScale) + dt * B11 * epeScale;
+                a12 += alphaDt * (steady12 - B12 * epeScale) + dt * B12 * epeScale;
+                a20 += alphaDt * (steady20 - B20 * epeScale) + dt * B20 * epeScale;
+                a21 += alphaDt * (steady21 - B21 * epeScale) + dt * B21 * epeScale;
+                a22 += alphaDt * (steady22 - B22 * epeScale) + dt * B22 * epeScale;
             }
             else
             {
-                Ae11[m][n] = ce[m][n]    + cpe[m][n]
-                           + ke[m][n]
-                           + kte[m][n]   + ktpe[m][n]
-                           + ktppe[m][n] + ytpe[m][n]
-                           + epe[m][n];
+                a00 += steady00;
+                a01 += steady01;
+                a02 += steady02;
+                a10 += steady10;
+                a11 += steady11;
+                a12 += steady12;
+                a20 += steady20;
+                a21 += steady21;
+                a22 += steady22;
             }
-        }
-        for (uint n=0;n<nen;n++)
-        {
+
+            Ae[m4+0][n4+0] += a00;
+            Ae[m4+0][n4+1] += a01;
+            Ae[m4+0][n4+2] += a02;
+            Ae[m4+1][n4+0] += a10;
+            Ae[m4+1][n4+1] += a11;
+            Ae[m4+1][n4+2] += a12;
+            Ae[m4+2][n4+0] += a20;
+            Ae[m4+2][n4+1] += a21;
+            Ae[m4+2][n4+2] += a22;
+
+            const double ge0 = Bm0 * iNn;
+            const double ge1 = Bm1 * iNn;
+            const double ge2 = Bm2 * iNn;
+            const double yteScale = Tsupg * vdivm * wt;
+            const double ae12Scale = unsteady ? -dt : -1.0;
+            Ae[m4+0][n4+3] += ae12Scale * (ge0 + yteScale * Bn0);
+            Ae[m4+1][n4+3] += ae12Scale * (ge1 + yteScale * Bn1);
+            Ae[m4+2][n4+3] += ae12Scale * (ge2 + yteScale * Bn2);
+
+            const double bteScale = Tpspg * iNn;
+            const double geTScale = iNm;
+            const double yeScale = Tpspg * vdiv[n] * wt;
+            const double ypeScale = Tpspg * iNn;
+            const double ype0 = ypeScale * (Bm0*vex[0] + Bm1*vex[1] + Bm2*vex[2]);
+            const double ype1 = ypeScale * (Bm0*vey[0] + Bm1*vey[1] + Bm2*vey[2]);
+            const double ype2 = ypeScale * (Bm0*vez[0] + Bm1*vez[1] + Bm2*vez[2]);
             if (unsteady)
             {
-                Ae12[m][n] = -dt * (ge[m][n] + yte[m][n]);
-                Ae21[n][m] = bte[n][m]
-                           + dt * geT[n][m]
-                           + alphaDt * (ye[n][m] + ype[n][m]);
+                Ae[m4+3][n4+0] += bteScale * Bm0 + dt * (Bn0 * geTScale) + alphaDt * (yeScale * Bm0 + ype0);
+                Ae[m4+3][n4+1] += bteScale * Bm1 + dt * (Bn1 * geTScale) + alphaDt * (yeScale * Bm1 + ype1);
+                Ae[m4+3][n4+2] += bteScale * Bm2 + dt * (Bn2 * geTScale) + alphaDt * (yeScale * Bm2 + ype2);
             }
             else
             {
-                Ae12[m][n] = -ge[m][n] - yte[m][n];
-                Ae21[n][m] =  geT[n][m] + ye[n][m] + ype[n][m];
+                Ae[m4+3][n4+0] += Bn0 * geTScale + yeScale * Bm0 + ype0;
+                Ae[m4+3][n4+1] += Bn1 * geTScale + yeScale * Bm1 + ype1;
+                Ae[m4+3][n4+2] += Bn2 * geTScale + yeScale * Bm2 + ype2;
             }
+
+            const double theta = Tpspg * (tmpValue * invro) * wt;
+            Ae[m4+3][n4+3] += unsteady ? dt * theta : theta;
         }
+
+        const double cv0 = iNm * ro * veVex0;
+        const double cv1 = iNm * ro * veVex1;
+        const double cv2 = iNm * ro * veVex2;
+        const double kv0 = u * (Bm0*vex[0] + Bm1*vey[0] + Bm2*vez[0] + Bm0*vex[0] + Bm1*vex[1] + Bm2*vex[2]) * wt;
+        const double kv1 = u * (Bm0*vex[1] + Bm1*vey[1] + Bm2*vez[1] + Bm0*vey[0] + Bm1*vey[1] + Bm2*vey[2]) * wt;
+        const double kv2 = u * (Bm0*vex[2] + Bm1*vey[2] + Bm2*vez[2] + Bm0*vez[0] + Bm1*vez[1] + Bm2*vez[2]) * wt;
+        const double gv0 = Bm0 * p * wt;
+        const double gv1 = Bm1 * p * wt;
+        const double gv2 = Bm2 * p * wt;
+        const double ktvScale = Tsupg * ro * vdivm * wt;
+        const double ktv0 = ktvScale * veVex0;
+        const double ktv1 = ktvScale * veVex1;
+        const double ktv2 = ktvScale * veVex2;
+        const double ytvScale = Tsupg * vdivm * wt;
+        const double ytv0 = ytvScale * px;
+        const double ytv1 = ytvScale * py;
+        const double ytv2 = ytvScale * pz;
+        const double evScale = Tlsic * ro * divV * wt;
+        const double ev0 = evScale * Bm0;
+        const double ev1 = evScale * Bm1;
+        const double ev2 = evScale * Bm2;
+        const double fvScale = ro * iNm;
+        const double ftvScale = Tsupg * ro * vdivm * wt;
+
         if (unsteady)
         {
-            be1[m] = dt * (fv[m] + ftv[m] - (  mv[m]  + ctv[m]
-                                             + cv[m]  + kv[m]
-                                             - gv[m]  + ktv[m]
-                                             - ytv[m] + ev[m]) );
+            const double mvScale = iNm * ro;
+            const double ctvScale = Tsupg * ro * vdivm * wt;
+            be[m4+0] += dt * (fvScale * g[0] + ftvScale * g[0] - (mvScale * ax[m] + ctvScale * ax[m] + cv0 + kv0 - gv0 + ktv0 - ytv0 + ev0));
+            be[m4+1] += dt * (fvScale * g[1] + ftvScale * g[1] - (mvScale * ay[m] + ctvScale * ay[m] + cv1 + kv1 - gv1 + ktv1 - ytv1 + ev1));
+            be[m4+2] += dt * (fvScale * g[2] + ftvScale * g[2] - (mvScale * az[m] + ctvScale * az[m] + cv2 + kv2 - gv2 + ktv2 - ytv2 + ev2));
+            be[m4+3] += dt * (Tpspg * (Bm0*g[0] + Bm1*g[1] + Bm2*g[2]) * wt
+                             - (Tpspg * (Bm0*ax[m] + Bm1*ay[m] + Bm2*az[m]) * wt
+                                + iNm * divV
+                                + Tpspg * (Bm0*veVex0 + Bm1*veVex1 + Bm2*veVex2) * wt
+                                + Tpspg * ((Bm0*px + Bm1*py + Bm2*pz) * invro) * wt));
         }
         else
         {
-            be1[m] = fv[m] + ftv[m] - (  cv[m]  + kv[m]
-                                       - gv[m]  + ktv[m]
-                                       - ytv[m] + ev[m]);
+            be[m4+0] += fvScale * g[0] + ftvScale * g[0] - (cv0 + kv0 - gv0 + ktv0 - ytv0 + ev0);
+            be[m4+1] += fvScale * g[1] + ftvScale * g[1] - (cv1 + kv1 - gv1 + ktv1 - ytv1 + ev1);
+            be[m4+2] += fvScale * g[2] + ftvScale * g[2] - (cv2 + kv2 - gv2 + ktv2 - ytv2 + ev2);
+            be[m4+3] += Tpspg * (Bm0*g[0] + Bm1*g[1] + Bm2*g[2]) * wt
+                       - (iNm * divV
+                          + Tpspg * (Bm0*veVex0 + Bm1*veVex1 + Bm2*veVex2) * wt
+                          + Tpspg * ((Bm0*px + Bm1*py + Bm2*pz) * invro) * wt);
         }
-
-        for (uint k=0;k<nen;k++)
-        {
-            for (uint l=0;l<nen;l++)
-            {
-                if (unsteady)
-                {
-                    Ae22[k][l] = dt * the[k][l];
-                }
-                else
-                {
-                    Ae22[k][l] = the[k][l];
-                }
-            }
-            if (unsteady)
-            {
-                be2[k] = dt * (etv[k] - (  btv[k] + gvT[k]
-                                         + yv[k] + thv[k]) );
-            }
-            else
-            {
-                be2[k] = etv[k] - (gvT[k] + yv[k] + thv[k]);
-            }
-        }
-    }
-
-    for (uint m=0;m<nen;m++)
-    {
-        uint64_t m3 = m*3;
-        uint64_t m4 = m*4;
-        for (uint n=0;n<nen;n++)
-        {
-            uint64_t n3 = n*3;
-            uint64_t n4 = n*4;
-
-            Ae[m4+0][n4+0] += Ae11[m3+0][n3+0];
-            Ae[m4+0][n4+1] += Ae11[m3+0][n3+1];
-            Ae[m4+0][n4+2] += Ae11[m3+0][n3+2];
-            Ae[m4+1][n4+0] += Ae11[m3+1][n3+0];
-            Ae[m4+1][n4+1] += Ae11[m3+1][n3+1];
-            Ae[m4+1][n4+2] += Ae11[m3+1][n3+2];
-            Ae[m4+2][n4+0] += Ae11[m3+2][n3+0];
-            Ae[m4+2][n4+1] += Ae11[m3+2][n3+1];
-            Ae[m4+2][n4+2] += Ae11[m3+2][n3+2];
-
-            Ae[m4+0][n4+3] += Ae12[m3+0][n];
-            Ae[m4+1][n4+3] += Ae12[m3+1][n];
-            Ae[m4+2][n4+3] += Ae12[m3+2][n];
-
-            Ae[m4+3][n4+0] += Ae21[m][n3+0];
-            Ae[m4+3][n4+1] += Ae21[m][n3+1];
-            Ae[m4+3][n4+2] += Ae21[m][n3+2];
-
-            Ae[m4+3][n4+3] += Ae22[m][n];
-        }
-        be[m4+0] += be1[m3+0];
-        be[m4+1] += be1[m3+1];
-        be[m4+2] += be1[m3+2];
-
-        be[m4+3] += be2[m];
     }
 
     double detJ = this->shapeDerivations[elementID]->getJacobian(0);
@@ -2473,42 +2302,95 @@ void RSolverFluid::computeElementFreePressure(RRVector &values, RBVector &setVal
     }
 }
 
-void RSolverFluid::assemblyMatrix(uint elementID, const RRMatrix &Ae, const RRVector &fe)
+void RSolverFluid::buildSparseMatrixPattern(const RBVector &elementFreePressureSetValues)
 {
-    const RElement &rElement = this->pModel->getElement(elementID);
+    this->A.clear();
+    this->A.setNRows(this->nodeBook.getNEnabled());
+    this->A.reserveNColumns(100);
 
-    // Assembly final matrix system
-    uint dims = 4;
-    for (uint m=0;m<rElement.size();m++)
+    const uint ne = this->pModel->getNElements();
+    this->elementActiveDofs.assign(ne,std::vector<uint>());
+    this->elementMatrixPositions.assign(ne,std::vector<uint>());
+    this->elementVectorPositions.assign(ne,std::vector<uint>());
+
+    for (uint elementID=0;elementID<ne;elementID++)
     {
-        uint mDims = dims*m;
-        uint mIdDims = dims*rElement.getNodeId(m);
-        for (uint i=0;i<dims;i++)
+        const RElement &rElement = this->pModel->getElement(elementID);
+
+        if (R_ELEMENT_TYPE_IS_VOLUME(rElement.getType()))
         {
-            uint mp = 0;
-
-            if (this->nodeBook.getValue(mIdDims+i,mp))
+            if (!this->computableElements[elementID])
             {
-                uint row = mDims+i;
-#pragma omp atomic
-                this->b[mp] += fe[row];
-#pragma omp critical
-                {
-                    for (uint n=0;n<rElement.size();n++)
-                    {
-                        uint nDims = dims*n;
-                        uint nIdDims = dims*rElement.getNodeId(n);
-                        for (uint j=0;j<dims;j++)
-                        {
-                            uint np = 0;
+                continue;
+            }
+        }
+        else if (R_ELEMENT_TYPE_IS_SURFACE(rElement.getType()))
+        {
+            if (!elementFreePressureSetValues[elementID])
+            {
+                continue;
+            }
+        }
+        else
+        {
+            continue;
+        }
 
-                            if (this->nodeBook.getValue(nIdDims+j,np))
-                            {
-                                this->A.addValue(mp,np,Ae[row][nDims+j]);
-                            }
-                        }
-                    }
+        const uint dims = 4;
+        const uint ndofs = rElement.size() * dims;
+        std::vector<uint> &activeDofs = this->elementActiveDofs[elementID];
+        std::vector<uint> &vectorPositions = this->elementVectorPositions[elementID];
+        std::vector<uint> &matrixPositions = this->elementMatrixPositions[elementID];
+        activeDofs.reserve(ndofs);
+        vectorPositions.assign(ndofs,RConstants::eod);
+        matrixPositions.assign(ndofs*ndofs,RConstants::eod);
+
+        for (uint m=0;m<rElement.size();m++)
+        {
+            uint mDims = dims*m;
+            uint mIdDims = dims*rElement.getNodeId(m);
+            for (uint i=0;i<dims;i++)
+            {
+                uint mp = 0;
+                uint row = mDims+i;
+                if (this->nodeBook.getValue(mIdDims+i,mp))
+                {
+                    vectorPositions[row] = mp;
+                    activeDofs.push_back(row);
                 }
+            }
+        }
+
+        for (uint row : activeDofs)
+        {
+            uint mp = vectorPositions[row];
+            for (uint column : activeDofs)
+            {
+                this->A.addValue(mp,vectorPositions[column],0.0);
+            }
+        }
+    }
+
+    for (uint elementID=0;elementID<ne;elementID++)
+    {
+        const std::vector<uint> &activeDofs = this->elementActiveDofs[elementID];
+        std::vector<uint> &vectorPositions = this->elementVectorPositions[elementID];
+        std::vector<uint> &matrixPositions = this->elementMatrixPositions[elementID];
+        if (activeDofs.empty())
+        {
+            continue;
+        }
+
+        const uint ndofs = vectorPositions.size();
+        for (uint row : activeDofs)
+        {
+            uint mp = vectorPositions[row];
+            for (uint column : activeDofs)
+            {
+                uint np = vectorPositions[column];
+                uint columnPosition = 0;
+                R_ERROR_ASSERT(this->A.findColumnPosition(mp,np,columnPosition));
+                matrixPositions[row*ndofs + column] = columnPosition;
             }
         }
     }
@@ -2517,33 +2399,21 @@ void RSolverFluid::assemblyMatrix(uint elementID, const RRMatrix &Ae, const RRVe
 void RSolverFluid::assemblyMatrix(unsigned int elementID, const RRMatrix &Ae, const RRVector &fe, RSparseMatrix &Ap, RRVector &bp)
 {
     const RElement &rElement = this->pModel->getElement(elementID);
+    const std::vector<uint> &activeDofs = this->elementActiveDofs[elementID];
+    const std::vector<uint> &vectorPositions = this->elementVectorPositions[elementID];
+    const std::vector<uint> &matrixPositions = this->elementMatrixPositions[elementID];
 
     // Assembly final matrix system
     uint dims = 4;
-    for (uint m=0;m<rElement.size();m++)
+    uint ndofs = rElement.size() * dims;
+    for (uint row : activeDofs)
     {
-        uint mDims = dims*m;
-        uint mIdDims = dims*rElement.getNodeId(m);
-        for (uint i=0;i<dims;i++)
+        uint mp = vectorPositions[row];
+        bp[mp] += fe[row];
+        for (uint column : activeDofs)
         {
-            uint mp = 0;
-            if (this->nodeBook.getValue(mIdDims+i,mp))
-            {
-                bp[mp] += fe[mDims+i];
-                for (uint n=0;n<rElement.size();n++)
-                {
-                    uint nDims = dims*n;
-                    uint nIdDims = dims*rElement.getNodeId(n);
-                    for (uint j=0;j<dims;j++)
-                    {
-                        uint np = 0;
-                        if (this->nodeBook.getValue(nIdDims+j,np))
-                        {
-                            Ap.addValue(mp,np,Ae[mDims+i][nDims+j]);
-                        }
-                    }
-                }
-            }
+            uint columnPosition = matrixPositions[row*ndofs + column];
+            Ap.addValueAtPosition(mp,columnPosition,Ae[row][column]);
         }
     }
 }

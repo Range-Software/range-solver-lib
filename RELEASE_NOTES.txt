@@ -50,11 +50,30 @@ Version 1.0.0
 - RSolverFluidHeat and RSolverFluidParticle: per-element velocity-divergence
   temporaries are reused from matrix containers instead of being allocated in
   every element integration path.
+- RSolverFluid::computeElementConstantDerivative(): intermediate element-level
+  matrices/vectors are no longer materialized and cleared for every element.
+  The final Ae/be contributions are accumulated directly, reducing memory
+  traffic in the constant-derivative fluid assembly path.
+- RSolverFluid::prepare(): the global sparse matrix pattern is now built once
+  when the mesh/node book changes and numeric values are zeroed in-place between
+  iterations, avoiding repeated sparse insertions for stable systems.
+- RSolverFluid::prepare(): each assembled element now caches its active local
+  DOFs and global sparse row/column positions; threaded assembly iterates only
+  active entries and writes directly to cached sparse positions.
 - RMatrixSolver: CG and GMRES cache sparse row indexes and values once per solve,
   avoiding repeated sparse-matrix lookups in matrix-vector products.
 - RMatrixSolver: CG updates/residual norms and GMRES Arnoldi orthogonalization
   work are now parallelized more broadly, and hot-loop pow(x, 2) calls were
   replaced with direct multiplication.
+- RMatrixSolver: sparse matrix data is now cached in a flat CSR-style layout and
+  reused across solver instances for the same RSparseMatrix when the row pattern
+  is unchanged; CG/GMRES SpMV and matrix norm evaluation use this cache.
+- RMatrixSolver::solveGMRES(): Arnoldi orthogonalization batches all current
+  Krylov dot products and applies the correction in a single vector pass,
+  reducing synchronization inside the inner iteration.
+- RMatrixPreconditioner: Jacobi stores inverse diagonal values and applies them
+  in parallel; block Jacobi now precomputes inverse blocks once and applies them
+  as dense block-vector products instead of solving each block every iteration.
 - Public solver headers and implementations now use empty parameter lists `()`
   instead of `(void)` for no-argument functions.
 

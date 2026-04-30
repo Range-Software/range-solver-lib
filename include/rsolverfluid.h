@@ -62,6 +62,12 @@ class RSolverFluid : public RSolverGeneric
         RRVector elementGravityMagnitude;
         //! Vector of element level shape function derivatives.
         std::vector<RElementShapeDerivation *> shapeDerivations;
+        //! Cached active local DOF indexes for each assembled element.
+        std::vector<std::vector<uint>> elementActiveDofs;
+        //! Cached global matrix positions for each element-local matrix entry.
+        std::vector<std::vector<uint>> elementMatrixPositions;
+        //! Cached global RHS positions for each element-local vector entry.
+        std::vector<std::vector<uint>> elementVectorPositions;
 
         //! Stop-watches
         RStopWatch recoveryStopWatch;
@@ -152,8 +158,8 @@ class RSolverFluid : public RSolverGeneric
         //! Find element free pressure.
         void computeElementFreePressure(RRVector &values, RBVector &setValues);
 
-        //! Assembly matrix.
-        void assemblyMatrix(unsigned int elementID, const RRMatrix &Ae, const RRVector &fe);
+        //! Build reusable sparse matrix pattern.
+        void buildSparseMatrixPattern(const RBVector &elementFreePressureSetValues);
 
         //! Assembly matrix.
         void assemblyMatrix(unsigned int elementID, const RRMatrix &Ae, const RRVector &fe, RSparseMatrix &Ap, RRVector &bp);

@@ -1,4 +1,5 @@
 #include <cmath>
+#include <unordered_map>
 #include <vector>
 
 #include <omp.h>
@@ -10,30 +11,111 @@
 namespace
 {
 
-struct SparseRowCache
+struct SparseMatrixCache
 {
-    std::vector<uint> indexes;
+    uint nRows = 0;
+    std::vector<uint> rowPtr;
+    std::vector<uint> columnIndexes;
     std::vector<double> values;
+    double norm = 0.0;
 };
 
-std::vector<SparseRowCache> buildSparseRowCache(const RSparseMatrix &A)
+SparseMatrixCache buildSparseMatrixCache(const RSparseMatrix &A)
 {
-    std::vector<SparseRowCache> rows(A.getNRows());
+    SparseMatrixCache cache;
+    cache.nRows = A.getNRows();
+    cache.rowPtr.resize(cache.nRows+1,0);
 
-#pragma omp parallel for default(shared)
+    for (uint i=0;i<cache.nRows;i++)
+    {
+        cache.rowPtr[i+1] = cache.rowPtr[i] + A.getVector(i).size();
+    }
+
+    cache.columnIndexes.resize(cache.rowPtr.back());
+    cache.values.resize(cache.rowPtr.back());
+
+    double norm2 = 0.0;
+#pragma omp parallel for default(shared) reduction(+:norm2)
+    for (int64_t i=0;i<int64_t(cache.nRows);i++)
+    {
+        const RSparseVector<double> &row = A.getVector(uint(i));
+        uint begin = cache.rowPtr[uint(i)];
+        for (uint j=0;j<row.size();j++)
+        {
+            double value = row.getValue(j);
+            cache.columnIndexes[begin+j] = row.getIndex(j);
+            cache.values[begin+j] = value;
+            norm2 += value*value;
+        }
+    }
+    cache.norm = std::sqrt(norm2);
+
+    return cache;
+}
+
+bool refreshSparseMatrixCache(const RSparseMatrix &A, SparseMatrixCache &cache)
+{
+    if (cache.nRows != A.getNRows() || cache.rowPtr.size() != A.getNRows()+1)
+    {
+        return false;
+    }
+
+    double norm2 = 0.0;
+    int samePattern = 1;
+#pragma omp parallel for default(shared) reduction(+:norm2) reduction(&:samePattern)
     for (int64_t i=0;i<int64_t(A.getNRows());i++)
     {
         const RSparseVector<double> &row = A.getVector(uint(i));
-        rows[uint(i)].indexes.resize(row.size());
-        rows[uint(i)].values.resize(row.size());
-        for (uint j=0;j<row.size();j++)
+        uint begin = cache.rowPtr[uint(i)];
+        uint end = cache.rowPtr[uint(i)+1];
+        if (row.size() != end-begin)
         {
-            rows[uint(i)].indexes[j] = row.getIndex(j);
-            rows[uint(i)].values[j] = row.getValue(j);
+            samePattern = 0;
+        }
+        else
+        {
+            for (uint j=0;j<row.size();j++)
+            {
+                double value = row.getValue(j);
+                if (cache.columnIndexes[begin+j] != row.getIndex(j))
+                {
+                    samePattern = 0;
+                }
+                cache.values[begin+j] = value;
+                norm2 += value*value;
+            }
         }
     }
 
-    return rows;
+    if (!samePattern)
+    {
+        return false;
+    }
+
+    cache.norm = std::sqrt(norm2);
+    return true;
+}
+
+const SparseMatrixCache &findSparseMatrixCache(const RSparseMatrix &A)
+{
+    static std::unordered_map<const RSparseMatrix*,SparseMatrixCache> caches;
+
+    SparseMatrixCache &cache = caches[&A];
+    if (!refreshSparseMatrixCache(A,cache))
+    {
+        cache = buildSparseMatrixCache(A);
+    }
+    return cache;
+}
+
+inline double multiplyRow(const SparseMatrixCache &matrix, uint row, const RRVector &x)
+{
+    double value = 0.0;
+    for (uint j=matrix.rowPtr[row];j<matrix.rowPtr[row+1];j++)
+    {
+        value += matrix.values[j] * x[matrix.columnIndexes[j]];
+    }
+    return value;
 }
 
 }
@@ -77,8 +159,9 @@ void RMatrixSolver::solve(const RSparseMatrix &A, const RRVector &b, RRVector &x
 {
     RMatrixPreconditioner P(A,matrixPreconditionerType,blockSize);
     RRVector y(b);
+    const SparseMatrixCache &matrix = findSparseMatrixCache(A);
 
-    double An = A.findNorm();
+    double An = matrix.norm;
     double bn = RRVector::euclideanNorm(b);
     double equationScale = 1.0;
 
@@ -125,6 +208,7 @@ void RMatrixSolver::disableConvergenceLogFile()
 void RMatrixSolver::solveCG(const RSparseMatrix &A, const RRVector &b, RRVector &x, RMatrixPreconditioner &P)
 {
     unsigned int m = A.getNRows();
+    const SparseMatrixCache &matrix = findSparseMatrixCache(A);
 
     RRVector r(m);
     RRVector z(m);
@@ -136,39 +220,28 @@ void RMatrixSolver::solveCG(const RSparseMatrix &A, const RRVector &b, RRVector 
     p.fill(0.0);
     q.fill(0.0);
 
-    double An = 0.0;
-    double bn = 0.0;
-    double ro[] = {0.0,0.0};
+    double ro0 = 0.0;
+    double ro1 = 0.0;
     double beta = 0.0;
     double dot = 0.0;
-    std::vector<SparseRowCache> rows = buildSparseRowCache(A);
     double alpha = 0.0;
     double xn = 0.0;
     double rn = 0.0;
+    double An = matrix.norm;
+    double bn = 0.0;
 
 #pragma omp parallel default(shared)
     {
         // Compute initial residual.
-#pragma omp for reduction(+:An,bn)
+#pragma omp for reduction(+:bn)
         for (int64_t i=0;i<int64_t(m);i++)
         {
-            r[i] = b[i];
-            bn = bn + (b[i]*b[i]);
-            const SparseRowCache &row = rows[uint(i)];
-            for (unsigned int j=0;j<row.indexes.size();j++)
-            {
-                double value = row.values[j];
-                An = An + value*value;
-                if (value != 0.0 && x[row.indexes[j]] != 0.0)
-                {
-                    r[i] -= value * x[row.indexes[j]];
-                }
-            }
+            r[uint(i)] = b[uint(i)] - multiplyRow(matrix,uint(i),x);
+            bn += b[uint(i)]*b[uint(i)];
         }
 #pragma omp barrier
 #pragma omp master
         {
-            An = std::sqrt(An);
             bn = std::sqrt(bn);
         }
 
@@ -179,18 +252,28 @@ void RMatrixSolver::solveCG(const RSparseMatrix &A, const RRVector &b, RRVector 
 #pragma omp master
             {
                 this->iterationInfo.setIteration(it);
-
-                P.compute(r,z);
-
-                ro[0] = RRVector::dot(r,z);
-
-                if (it > 0)
-                {
-                    beta = ro[0] / ro[1];
-                    ro[1]= std::max(ro[1],RConstants::eps);
-                }
             }
 
+#pragma omp barrier
+            P.compute(r,z);
+
+#pragma omp master
+            ro0 = 0.0;
+#pragma omp barrier
+#pragma omp for reduction(+:ro0)
+            for (int64_t i=0;i<int64_t(m);i++)
+            {
+                ro0 += r[uint(i)] * z[uint(i)];
+            }
+
+#pragma omp master
+            {
+                if (it > 0)
+                {
+                    beta = ro0 / ro1;
+                    ro1 = std::max(ro1,RConstants::eps);
+                }
+            }
 #pragma omp barrier
 #pragma omp for
             for (int64_t i=0;i<int64_t(m);i++)
@@ -212,17 +295,8 @@ void RMatrixSolver::solveCG(const RSparseMatrix &A, const RRVector &b, RRVector 
 #pragma omp for reduction(+:dot)
             for (int64_t i=0;i<int64_t(m);i++)
             {
-                q[i] = 0.0;
-                const SparseRowCache &row = rows[uint(i)];
-                for (unsigned int j=0;j<row.indexes.size();j++)
-                {
-                    double value = row.values[j];
-                    if (value != 0.0)
-                    {
-                        q[i] += value * p[row.indexes[j]];
-                    }
-                }
-                dot = dot + p[i]*q[i];
+                q[uint(i)] = multiplyRow(matrix,uint(i),p);
+                dot += p[uint(i)]*q[uint(i)];
             }
 
 #pragma omp master
@@ -240,8 +314,8 @@ void RMatrixSolver::solveCG(const RSparseMatrix &A, const RRVector &b, RRVector 
                     dot = RConstants::eps;
                 }
 
-                alpha = ro[0] / dot;
-                ro[1] = ro[0];
+                alpha = ro0 / dot;
+                ro1 = ro0;
                 xn = 0.0;
                 rn = 0.0;
             }
@@ -283,6 +357,7 @@ void RMatrixSolver::solveCG(const RSparseMatrix &A, const RRVector &b, RRVector 
 void RMatrixSolver::solveGMRES(const RSparseMatrix &A, const RRVector &b, RRVector &x, RMatrixPreconditioner &P)
 {
     uint mA = A.getNRows();
+    const SparseMatrixCache &matrix = findSparseMatrixCache(A);
     uint nouter = this->matrixSolverConf.getNOuterIterations();
     uint ninner = this->matrixSolverConf.getNInnerIterations();
 
@@ -296,15 +371,13 @@ void RMatrixSolver::solveGMRES(const RSparseMatrix &A, const RRVector &b, RRVect
     RRMatrix z(ninner+1,mA,0.0);
     RRMatrix h(ninner+1,ninner,0.0);
 
-    std::vector<SparseRowCache> rows = buildSparseRowCache(A);
-
-    double An = A.findNorm();
+    double An = matrix.norm;
     double bn = RRVector::euclideanNorm(b);
 
     double beta = 0.0;
     double xn = 0.0;
-    double hValue = 0.0;
     double wNorm = 0.0;
+    RRVector hValues(ninner+1,0.0);
 
 #pragma omp parallel default(shared)
     {
@@ -328,12 +401,7 @@ void RMatrixSolver::solveGMRES(const RSparseMatrix &A, const RRVector &b, RRVect
 #pragma omp for reduction(+:xn,beta)
             for (int64_t i=0;i<int64_t(mA);i++)
             {
-                ro[i] = b[i];
-                const SparseRowCache &row = rows[uint(i)];
-                for (uint j=0;j<row.indexes.size();j++)
-                {
-                    ro[i] -= row.values[j] * x[row.indexes[j]];
-                }
+                ro[uint(i)] = b[uint(i)] - multiplyRow(matrix,uint(i),x);
                 xn += x[uint(i)]*x[uint(i)];
                 beta += ro[uint(i)]*ro[uint(i)];
             }
@@ -374,46 +442,56 @@ void RMatrixSolver::solveGMRES(const RSparseMatrix &A, const RRVector &b, RRVect
             for (iti=0;iti<ninner;iti++)
             {
 #pragma omp barrier
-#pragma omp master
-                {
-                    // Preconditioning
-                    P.compute(v[iti],z[iti]);
-//                    RLogger::warning("%u v %13g\n",iti,RRVector::norm(v[iti])-1.0);
-//                    RLogger::warning("%u z %13g\n",iti,RRVector::norm(z[iti]));
-                }
+                // Preconditioning
+                P.compute(v[iti],z[iti]);
+//                RLogger::warning("%u v %13g\n",iti,RRVector::norm(v[iti])-1.0);
+//                RLogger::warning("%u z %13g\n",iti,RRVector::norm(z[iti]));
 #pragma omp barrier
                 // A multiplied by the last krylov vector at present
 #pragma omp for
                 for (int64_t i=0;i<int64_t(mA);i++)
                 {
-                    w[i] = 0.0;
-                    const SparseRowCache &row = rows[uint(i)];
-                    for (uint j=0;j<row.indexes.size();j++)
+                    w[uint(i)] = multiplyRow(matrix,uint(i),z[iti]);
+                }
+                // Orthogonalize the candidate vector against the current basis.
+#pragma omp single
+                hValues.fill(0.0);
+#pragma omp barrier
+                std::vector<double> hLocal(iti+1,0.0);
+#pragma omp for nowait
+                for (int64_t j=0;j<int64_t(mA);j++)
+                {
+                    double wj = w[uint(j)];
+                    for (uint i=0;i<=iti;i++)
                     {
-                        w[i] += row.values[j] * z[iti][row.indexes[j]];
+                        hLocal[i] += wj * v[i][uint(j)];
                     }
                 }
-                // of potential krylov vector with existing subtract dot prod to get orthogonal
-#pragma omp barrier
-                for (uint i=0;i<=iti;i++)
+#pragma omp critical
                 {
-#pragma omp single
-                    hValue = 0.0;
-#pragma omp barrier
-#pragma omp for reduction(+:hValue)
-                    for (int64_t j=0;j<int64_t(mA);j++)
+                    for (uint i=0;i<=iti;i++)
                     {
-                        hValue += w[uint(j)] * v[i][uint(j)];
+                        hValues[i] += hLocal[i];
                     }
+                }
+#pragma omp barrier
 #pragma omp single
-                    h[i][iti] = hValue;
+                {
+                    for (uint i=0;i<=iti;i++)
+                    {
+                        h[i][iti] = hValues[i];
+                    }
+                }
 #pragma omp barrier
 #pragma omp for
-                    for (int64_t j=0;j<int64_t(mA);j++)
+                for (int64_t j=0;j<int64_t(mA);j++)
+                {
+                    double value = w[uint(j)];
+                    for (uint i=0;i<=iti;i++)
                     {
-                        w[uint(j)] -= h[i][iti] * v[i][uint(j)];
+                        value -= hValues[i] * v[i][uint(j)];
                     }
-#pragma omp barrier
+                    w[uint(j)] = value;
                 }
 
 #pragma omp single

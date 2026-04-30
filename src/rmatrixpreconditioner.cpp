@@ -20,6 +20,8 @@ RMatrixPreconditioner::RMatrixPreconditioner(const RSparseMatrix &matrix, RMatri
 
     switch (matrixPreconditionerType)
     {
+        case R_MATRIX_PRECONDITIONER_NONE:
+            break;
         case R_MATRIX_PRECONDITIONER_JACOBI:
             this->constructJacobi(matrix);
             break;
@@ -50,6 +52,18 @@ void RMatrixPreconditioner::compute(const RRVector &x, RRVector &y) const
 {
     switch (matrixPreconditionerType)
     {
+        case R_MATRIX_PRECONDITIONER_NONE:
+        {
+#pragma omp single
+            y.resize(x.getNRows());
+#pragma omp barrier
+#pragma omp for
+            for (int64_t i=0;i<int64_t(x.getNRows());i++)
+            {
+                y[uint(i)] = x[uint(i)];
+            }
+            break;
+        }
         case R_MATRIX_PRECONDITIONER_JACOBI:
             this->computeJacobi(x,y);
             break;
@@ -73,7 +87,8 @@ void RMatrixPreconditioner::constructJacobi(const RSparseMatrix &matrix)
         unsigned int columnPosition = 0;
         if (matrix.findColumnPosition(i,i,columnPosition))
         {
-            this->data[i][0] = matrix.getValue(i,columnPosition);
+            double value = matrix.getValue(i,columnPosition);
+            this->data[i][0] = (value == 0.0) ? 0.0 : 1.0 / value;
         }
     }
 }
@@ -93,19 +108,40 @@ void RMatrixPreconditioner::constructBlockJacobi(const RSparseMatrix &matrix, un
 
     unsigned int nBlocks = nRows/width;
 
-    for (unsigned int i=0;i<nBlocks;i++)
+#pragma omp parallel for default(shared)
+    for (int64_t i=0;i<int64_t(nBlocks);i++)
     {
         for (unsigned int k=0;k<width;k++)
         {
-            unsigned int m = i*width + k;
+            unsigned int m = uint(i)*width + k;
             for (unsigned int l=0;l<width;l++)
             {
-                unsigned int n = i*width + l;
+                unsigned int n = uint(i)*width + l;
                 unsigned int columnPosition = 0;
                 if (matrix.findColumnPosition(m,n,columnPosition))
                 {
                     this->data[m][l] = matrix.getValue(m,columnPosition);
                 }
+            }
+        }
+
+        RRMatrix inverse(width,width,0.0);
+        for (unsigned int k=0;k<width;k++)
+        {
+            unsigned int m = uint(i)*width + k;
+            for (unsigned int l=0;l<width;l++)
+            {
+                inverse[k][l] = this->data[m][l];
+            }
+        }
+        inverse.invert();
+
+        for (unsigned int k=0;k<width;k++)
+        {
+            unsigned int m = uint(i)*width + k;
+            for (unsigned int l=0;l<width;l++)
+            {
+                this->data[m][l] = inverse[k][l];
             }
         }
     }
@@ -115,11 +151,14 @@ void RMatrixPreconditioner::computeJacobi(const RRVector &x, RRVector &y) const
 {
     unsigned int nRows = this->data.getNRows();
 
+#pragma omp single
     y.resize(nRows);
+#pragma omp barrier
 
-    for (unsigned int i=0;i<nRows;i++)
+#pragma omp for
+    for (int64_t i=0;i<int64_t(nRows);i++)
     {
-        y[i] = (this->data[i][0] == 0.0) ? 0.0 : x[i] / this->data[i][0];
+        y[uint(i)] = this->data[uint(i)][0] * x[uint(i)];
     }
 }
 
@@ -128,32 +167,24 @@ void RMatrixPreconditioner::computeBlockJacobi(const RRVector &x, RRVector &y) c
     unsigned int nRows = this->data.getNRows();
     unsigned int width = this->data.getNColumns();
 
+#pragma omp single
     y.resize(nRows);
-
-    RRMatrix As(width,width);
-    RRVector xs(width);
-    RRVector ys(width);
+#pragma omp barrier
 
     unsigned int nBlocks = nRows/width;
 
-    for (unsigned int i=0;i<nBlocks;i++)
+#pragma omp for
+    for (int64_t i=0;i<int64_t(nBlocks);i++)
     {
         for (unsigned int k=0;k<width;k++)
         {
-            unsigned int m = i*width + k;
+            unsigned int m = uint(i)*width + k;
+            double value = 0.0;
             for (unsigned int l=0;l<width;l++)
             {
-                As[k][l] = this->data[m][l];
+                value += this->data[m][l] * x[uint(i)*width + l];
             }
-            xs[k] = x[m];
-        }
-
-        RRMatrix::solveLU(As,xs,ys);
-
-        for (unsigned int k=0;k<width;k++)
-        {
-            unsigned int m = i*width + k;
-            y[m] = ys[k];
+            y[m] = value;
         }
     }
 }
