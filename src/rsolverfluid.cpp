@@ -1,3 +1,4 @@
+#include <atomic>
 #include <omp.h>
 
 #include "rsolverfluid.h"
@@ -56,6 +57,10 @@ class FluidMatrixContainer
         RRVector be1;
         RRVector be2;
 
+        // Assembled element system (thread-local, avoids per-element heap allocation)
+        RRMatrix Ae;
+        RRVector be;
+
         // Thread-local temporary vectors (avoid per-element allocation)
         RRVector ax;
         RRVector ay;
@@ -113,6 +118,9 @@ class FluidMatrixContainer
             this->be1.resize(nen*3,0.0);
             this->be2.resize(nen,0.0);
 
+            this->Ae.resize(nen*4,nen*4,0.0);
+            this->be.resize(nen*4,0.0);
+
             // Thread-local temporary vectors
             this->ax.resize(nen,0.0);
             this->ay.resize(nen,0.0);
@@ -165,6 +173,9 @@ class FluidMatrixContainer
             this->Ae22.fill(0.0);
             this->be1.fill(0.0);
             this->be2.fill(0.0);
+
+            this->Ae.fill(0.0);
+            this->be.fill(0.0);
 
             // Thread-local temporary vectors
             this->ax.fill(0.0);
@@ -291,10 +302,33 @@ void RSolverFluid::prepare()
         this->findInputVectors();
     }
 
-    this->pModel->convertNodeToElementVector(this->nodePressure,this->elementPressure);
-    this->pModel->convertNodeToElementVector(this->nodeVelocity.x,this->elementVelocity.x);
-    this->pModel->convertNodeToElementVector(this->nodeVelocity.y,this->elementVelocity.y);
-    this->pModel->convertNodeToElementVector(this->nodeVelocity.z,this->elementVelocity.z);
+    {
+        const uint ne = this->pModel->getNElements();
+        this->elementPressure.resize(ne,0.0);
+        this->elementVelocity.x.resize(ne,0.0);
+        this->elementVelocity.y.resize(ne,0.0);
+        this->elementVelocity.z.resize(ne,0.0);
+        #pragma omp parallel for default(shared)
+        for (int64_t i=0;i<int64_t(ne);i++)
+        {
+            const RElement &el = this->pModel->getElement(uint(i));
+            uint nen = el.size();
+            double p = 0.0, vx = 0.0, vy = 0.0, vz = 0.0;
+            for (uint j=0;j<nen;j++)
+            {
+                uint nid = el.getNodeId(j);
+                p  += this->nodePressure[nid];
+                vx += this->nodeVelocity.x[nid];
+                vy += this->nodeVelocity.y[nid];
+                vz += this->nodeVelocity.z[nid];
+            }
+            double inv = 1.0 / double(nen);
+            this->elementPressure[uint(i)]    = p  * inv;
+            this->elementVelocity.x[uint(i)] = vx * inv;
+            this->elementVelocity.y[uint(i)] = vy * inv;
+            this->elementVelocity.z[uint(i)] = vz * inv;
+        }
+    }
 
     if (this->meshChanged)
     {
@@ -335,7 +369,7 @@ void RSolverFluid::prepare()
         bp[i].fill(0.0);
     }
 
-    bool abort = false;
+    std::atomic<bool> abort{false};
 
     RMatrixManager<FluidMatrixContainer> matrixManager;
 
@@ -355,18 +389,19 @@ void RSolverFluid::prepare()
 
         const RElement &element = this->pModel->getElement(elementID);
 
-        #pragma omp flush (abort)
-        if (abort)
+        if (abort.load(std::memory_order_relaxed))
         {
             continue;
         }
         try
         {
-            uint nen = element.size();
             uint nInp = RElement::getNIntegrationPoints(element.getType());
 
-            RRMatrix Ae(nen*4,nen*4,0.0);
-            RRVector be(nen*4,0.0);
+            FluidMatrixContainer &mc = matrixManager.getMatricies(element.getType());
+            mc.Ae.fill(0.0);
+            mc.be.fill(0.0);
+            RRMatrix &Ae = mc.Ae;
+            RRVector &be = mc.be;
 
             if (R_ELEMENT_TYPE_IS_SURFACE(element.getType()))
             {
@@ -380,9 +415,10 @@ void RSolverFluid::prepare()
                 {
                     // no need to recalculate if mesh does not change !!!
                     element.findNormal(this->pModel->getNodes(),normal[0],normal[1],normal[2]);
-                    this->elementGravityMagnitude[elementID] = std::sqrt(  std::pow(elementGravity.x[elementID],2)
-                                                                         + std::pow(elementGravity.y[elementID],2)
-                                                                         + std::pow(elementGravity.z[elementID],2));
+                    double gx = elementGravity.x[elementID];
+                    double gy = elementGravity.y[elementID];
+                    double gz = elementGravity.z[elementID];
+                    this->elementGravityMagnitude[elementID] = std::sqrt(gx*gx + gy*gy + gz*gz);
                 }
 
                 double ro = this->elementDensity[elementID];
@@ -432,9 +468,8 @@ void RSolverFluid::prepare()
             #pragma omp critical
             {
                 RLogger::error("%s\n",rError.getMessage().toUtf8().constData());
-                abort = true;
             }
-            #pragma omp flush (abort)
+            abort.store(true,std::memory_order_relaxed);
         }
     }
 
