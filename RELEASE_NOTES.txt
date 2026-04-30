@@ -1,13 +1,6 @@
 ---------------------------------------------------------------------------------
 Version 1.0.0
 
-- RSparseVector::addValue(): linear search (std::find) and full re-sort on every
-  new entry replaced with binary search (std::lower_bound) and a single sorted
-  insert, reducing per-call complexity from O(n log n) to O(log n + n) while
-  keeping the vector sorted.
-- RSparseVector::addVector(): loop of per-entry addValue() calls replaced with a
-  two-pointer O(n+m) sorted merge; eliminates the dominant cost in the per-thread
-  matrix reduction loop in all solvers.
 - RSolverFluid::prepare(): Ae/be element matrices lifted into FluidMatrixContainer
   as thread-local storage, eliminating a heap allocation and deallocation for every
   element on every assembly pass.
