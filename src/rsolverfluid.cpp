@@ -3,8 +3,6 @@
 #include "rsolverfluid.h"
 #include "rmatrixsolver.h"
 
-#define _OPTIMAL_ASSEMBLY_
-
 static const double inv6 = 1.0 / 6.0;
 
 class FluidMatrixContainer
@@ -322,7 +320,6 @@ void RSolverFluid::prepare()
     this->x.resize(this->nodeBook.getNEnabled());
     this->x.fill(0.0);
 
-#ifdef _OPTIMAL_ASSEMBLY_
     int np = omp_get_max_threads();
 
     QVector<RSparseMatrix> Ap;
@@ -337,7 +334,6 @@ void RSolverFluid::prepare()
         bp[i].resize(this->nodeBook.getNEnabled());
         bp[i].fill(0.0);
     }
-#endif /* _OPTIMAL_ASSEMBLY_ */
 
     bool abort = false;
 
@@ -429,11 +425,7 @@ void RSolverFluid::prepare()
                 this->computeElement(elementID,Ae,be,matrixManager);
             }
             this->applyLocalRotations(elementID,Ae);
-#ifdef _OPTIMAL_ASSEMBLY_
             this->assemblyMatrix(elementID,Ae,be,Ap[omp_get_thread_num()],bp[omp_get_thread_num()]);
-#else
-            this->assemblyMatrix(elementID,Ae,be);
-#endif
         }
         catch (const RError &rError)
         {
@@ -446,7 +438,6 @@ void RSolverFluid::prepare()
         }
     }
 
-#ifdef _OPTIMAL_ASSEMBLY_
 #pragma omp parallel for default(shared)
     for (int64_t i=0;i<int64_t(this->A.getNRows());i++)
     {
@@ -456,7 +447,6 @@ void RSolverFluid::prepare()
             this->b[uint(i)] += bp[j][uint(i)];
         }
     }
-#endif
 
     this->buildStopWatch.pause();
 
@@ -2383,8 +2373,6 @@ void RSolverFluid::computeElementScales()
     this->elementScales.resize(this->pModel->getNElements());
     this->elementScales.fill(0.0);
 
-    double third = 1.0/3.0;
-
 #pragma omp parallel for default(shared)
     for (int64_t i=0;i<int64_t(this->pModel->getNElements());i++)
     {
@@ -2400,11 +2388,11 @@ void RSolverFluid::computeElementScales()
         }
         if (rElement.getType() == R_ELEMENT_TETRA1)
         {
-            this->elementScales[uint(i)] = std::pow(6.0 * volume / RConstants::pi, third);
+            this->elementScales[uint(i)] = std::cbrt(6.0 * volume / RConstants::pi);
         }
         else if (rElement.getType() == R_ELEMENT_HEXA1)
         {
-            this->elementScales[uint(i)] = std::pow(volume, third);
+            this->elementScales[uint(i)] = std::cbrt(volume);
         }
         else
         {
