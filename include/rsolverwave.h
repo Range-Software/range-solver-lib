@@ -24,7 +24,7 @@ class RSolverWave : public RSolverGeneric
         ~RSolverWave();
 
         //! Check if solver has converged.
-        bool hasConverged() const;
+        bool hasConverged() const override;
 
     protected:
 
@@ -32,25 +32,25 @@ class RSolverWave : public RSolverGeneric
         void initialize() override;
 
         //! Update scales.
-        void updateScales();
+        void updateScales() override;
 
         //! Recover previously computed results.
-        void recover();
+        void recover() override;
 
         //! Prepare solver.
-        void prepare();
+        void prepare() override;
 
         //! Run matrix solver.
-        void solve();
+        void solve() override;
 
         //! Process solver results.
-        void process();
+        void process() override;
 
         //! Store solver results.
-        void store();
+        void store() override;
 
         //! Process statistics.
-        void statistics();
+        void statistics() override;
 
 };
 

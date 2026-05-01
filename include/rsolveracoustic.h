@@ -37,7 +37,7 @@ class RSolverAcoustic : public RSolverGeneric
         ~RSolverAcoustic();
 
         //! Check if solver has converged.
-        bool hasConverged() const;
+        bool hasConverged() const override;
 
     protected:
 
@@ -47,19 +47,19 @@ class RSolverAcoustic : public RSolverGeneric
         void initialize() override;
 
         //! Update scales.
-        void updateScales();
+        void updateScales() override;
 
         //! Recover previously computed results.
-        void recover();
+        void recover() override;
 
         //! Prepare solver.
-        void prepare();
+        void prepare() override;
 
         //! Run matrix solver.
-        void solve();
+        void solve() override;
 
         //! Process solver results.
-        void process();
+        void process() override;
 
         //! Process absorbing boundary.
         void processAbsorbingBoundary();
@@ -71,10 +71,10 @@ class RSolverAcoustic : public RSolverGeneric
         void processAcousticParticleVelocity();
 
         //! Store solver results.
-        void store();
+        void store() override;
 
         //! Process statistics.
-        void statistics();
+        void statistics() override;
 
         //! Assembly matrix
         void assemblyMatrix(unsigned int elementID, const RRMatrix &Me, const RRMatrix &Ce, const RRMatrix &Ke, const RRVector &fe);

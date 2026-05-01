@@ -51,7 +51,7 @@ class RSolverStress : public RSolverGeneric
         ~RSolverStress();
 
         //! Check if solver has converged.
-        bool hasConverged() const;
+        bool hasConverged() const override;
 
     protected:
 
@@ -59,16 +59,16 @@ class RSolverStress : public RSolverGeneric
         void initialize() override;
 
         //! Update scales.
-        void updateScales();
+        void updateScales() override;
 
         //! Recover previously computed results.
-        void recover();
+        void recover() override;
 
         //! Prepare solver.
-        void prepare();
+        void prepare() override;
 
         //! Run matrix solver.
-        void solve();
+        void solve() override;
 
         //! Solve stress-strain problem.
         void solveStressStrain();
@@ -80,13 +80,13 @@ class RSolverStress : public RSolverGeneric
         void setDisplacement(const RRVector &v);
 
         //! Process solver results.
-        void process();
+        void process() override;
 
         //! Store solver results.
-        void store();
+        void store() override;
 
         //! Process statistics.
-        void statistics();
+        void statistics() override;
 
         //! Generate node book.
         void generateNodeBook();
