@@ -1,0 +1,113 @@
+## Version 1.0.0
+
+### Improvements
+
+- **RSolverFluid::prepare():** `Ae`/`be` element matrices lifted into `FluidMatrixContainer`
+  as thread-local storage, eliminating a heap allocation and deallocation for every
+  element on every assembly pass.
+- **RSolverFluid::prepare():** four sequential `convertNodeToElementVector` calls
+  replaced with a single OpenMP parallel loop, reducing four element traversals
+  to one.
+- **RSolverFluid::prepare():** `bool` abort flag with `#pragma omp flush` replaced by
+  `std::atomic<bool>` with `memory_order_relaxed`, removing explicit memory barriers
+  from the check at the top of every element iteration.
+- **RSolverFluid::prepare():** `std::pow(x, 2)` in surface-element gravity-magnitude
+  calculation replaced with direct multiplication.
+- **RSolverGeneric::findInwardElements():** O(N_surfaces × N_elements) nested scan
+  replaced with a pre-built node-to-volume-element index constructed in one
+  O(N_elements) pass, reducing the per-surface-element search from O(N_elements)
+  to O(local_node_degree).
+- **RSolverGeneric::processMonitoringPoints():** missing `break` added after the
+  containing element is found, stopping the O(N_elements) `isInside()` scan as
+  soon as the result is known.
+- **RHemiCubeSector:** `limitBox` (bounding box of the limit polygon) is now cached at
+  construction time instead of being recomputed on every `testVisibility()` call.
+- **RHemiCube::calculateViewFactors():** element triangulations are pre-computed once
+  before the parallel eye-patch loop instead of being recomputed for every
+  (eye-patch, element) pair.
+- **RHemiCubeTriangleComp:** sort comparator now uses squared distances, eliminating
+  all `sqrt` calls from the O(N log N) triangle sort.
+- **RSolverRadiativeHeat::prepare():** per-thread `b[i]` is now accumulated in a local
+  variable and the `omp critical` section covers only `A.addValue`, removing the
+  serialisation of the entire inner j-loop.
+- **RSolverHeat::prepare():** `getTimeSolver().getEnabled()` hoisted out of the
+  innermost integration-point loop into a single `const bool`.
+- **RSolverStress::prepare(), process():** the compound condition
+  `getEnabled() || problemType==MODAL` hoisted out of all inner loops.
+- **RConvection::calculateGr():** `pow(x, 2.0)` and `pow(x, 3.0)` replaced with direct
+  multiplication.
+- **RSolverGeneric:** node-book generation now batches disabled positions and
+  rebuilds the compacted book in one linear pass, avoiding repeated full-book
+  consolidation while applying boundary-condition constraints.
+- **RSolverFluid:** node-book generation uses the batched `RSolverGeneric` path, and
+  average stream-velocity calculation now uses direct multiplication plus an
+  OpenMP reduction instead of `pow()` and atomic accumulation.
+- **RSolverFluidHeat and RSolverFluidParticle:** matrix assembly now uses per-thread
+  sparse matrices/vectors and merges after the parallel element loop, removing
+  the OpenMP critical section around element assembly.
+- **RSolverFluidHeat and RSolverFluidParticle:** shape derivatives, node books, and
+  stream velocity are reused across iterations unless the mesh or first-iteration
+  state requires recomputation.
+- **RSolverFluidHeat and RSolverFluidParticle:** per-element velocity-divergence
+  temporaries are reused from matrix containers instead of being allocated in
+  every element integration path.
+- **RSolverFluid::computeElementConstantDerivative():** intermediate element-level
+  matrices/vectors are no longer materialized and cleared for every element.
+  The final `Ae`/`be` contributions are accumulated directly, reducing memory
+  traffic in the constant-derivative fluid assembly path.
+- **RSolverFluid::prepare():** the global sparse matrix pattern is now built once
+  when the mesh/node book changes and numeric values are zeroed in-place between
+  iterations, avoiding repeated sparse insertions for stable systems.
+- **RSolverFluid::prepare():** each assembled element now caches its active local
+  DOFs and global sparse row/column positions; threaded assembly iterates only
+  active entries and writes directly to cached sparse positions.
+- **RMatrixSolver:** CG and GMRES cache sparse row indexes and values once per solve,
+  avoiding repeated sparse-matrix lookups in matrix-vector products.
+- **RMatrixSolver:** CG updates/residual norms and GMRES Arnoldi orthogonalization
+  work are now parallelized more broadly, and hot-loop `pow(x, 2)` calls were
+  replaced with direct multiplication.
+- **RMatrixSolver:** sparse matrix data is now cached in a flat CSR-style layout and
+  reused across solver instances for the same `RSparseMatrix` when the row pattern
+  is unchanged; CG/GMRES SpMV and matrix norm evaluation use this cache.
+- **RMatrixSolver::solveGMRES():** Arnoldi orthogonalization batches all current
+  Krylov dot products and applies the correction in a single vector pass,
+  reducing synchronization inside the inner iteration.
+- **RMatrixPreconditioner:** Jacobi stores inverse diagonal values and applies them
+  in parallel; block Jacobi now precomputes inverse blocks once and applies them
+  as dense block-vector products instead of solving each block every iteration.
+- Public solver headers and implementations now use empty parameter lists `()`
+  instead of `(void)` for no-argument functions.
+
+### Bug fixes
+
+- **RConvection::getFluidTemp():** was returning surface temperature (Ts) instead of
+  fluid temperature (Tf).
+- **RConvection::calculateNu():** laminar internal forced convection Nusselt number
+  was dividing by `(Re*Pr)^(2/3)` instead of multiplying by `(Re*Pr)^(1/3)`.
+- **RConvection::calculateNu():** unreachable branch in the horizontal-plates case
+  corrected; Ra ranges now cover all cases without overlap or gap.
+- **RHemiCubeSector::rayTraceTriangle():** depth-skip guard was testing pixel row `i`
+  instead of the current pixel (`pixelId`), causing incorrect occlusion decisions.
+- **REigenValueSolver::qlDecomposition():** inner Givens rotation loop incremented `i`
+  instead of decrementing it, producing an infinite loop or out-of-bounds access.
+  Loop variable changed to `signed int` to handle the `l=0` boundary safely.
+- **REigenValueSolver::solveRayleigh():** initial shift `mu` was computed from an
+  uninitialised vector element; replaced with a bounded random value.
+- **R_EIS_PYTHAG macro:** arguments were not parenthesised, causing wrong results
+  when expressions with lower precedence than `*` were passed.
+- **RSolverRadiativeHeat::prepare():** RHS vector was assembled into `b[j]` (receiving
+  patch) instead of `b[i]` (emitting patch), producing a wrong system. The write to
+  `b[i]` for the ambient term was also outside the critical section, causing a data
+  race under OpenMP.
+- **RSolverGeneric::run():** `static local updateScalesDone` persisted for the process
+  lifetime, preventing `updateScales()` from being called on subsequent solves.
+  Replaced with the existing `firstRun` member.
+- **RSolverWave::prepare():** `static local firstTime` was never reset, so initial
+  conditions were skipped on every run after the first. Replaced with `firstRun`.
+- **RSolverFluid, RSolverFluidHeat, RSolverFluidParticle:** static locals `counter` and
+  `oldResidual` in `statistics()` were never reset between solver runs, corrupting
+  convergence history output. Promoted to member variables.
+- **RSolverFluidHeat:** element heat accumulation now sizes node accumulation arrays
+  by node count instead of element count.
+- **RSolverFluidParticle:** particle-rate recovery now uses element count for
+  element-applied values instead of node count.
