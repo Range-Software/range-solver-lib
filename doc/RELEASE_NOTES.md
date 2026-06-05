@@ -13,12 +13,12 @@
   from the check at the top of every element iteration.
 - **RSolverFluid::prepare():** `std::pow(x, 2)` in surface-element gravity-magnitude
   calculation replaced with direct multiplication.
-- **RSolverGeneric::findInwardElements():** O(N_surfaces × N_elements) nested scan
+- **RSolverGeneric::findInwardElements():** O(`N_surfaces` × `N_elements`) nested scan
   replaced with a pre-built node-to-volume-element index constructed in one
-  O(N_elements) pass, reducing the per-surface-element search from O(N_elements)
-  to O(local_node_degree).
+  O(`N_elements`) pass, reducing the per-surface-element search from O(`N_elements`)
+  to O(`local_node_degree`).
 - **RSolverGeneric::processMonitoringPoints():** missing `break` added after the
-  containing element is found, stopping the O(N_elements) `isInside()` scan as
+  containing element is found, stopping the O(`N_elements`) `isInside()` scan as
   soon as the result is known.
 - **RHemiCubeSector:** `limitBox` (bounding box of the limit polygon) is now cached at
   construction time instead of being recomputed on every `testVisibility()` call.
