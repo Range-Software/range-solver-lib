@@ -1,6 +1,6 @@
 #include <rbl_application_state.h>
 
-#include <rml_file_manager.h>
+#include <rml_file_utils.h>
 
 #include "rsolver.h"
 #include "rsolveracoustic.h"
@@ -23,7 +23,7 @@ void RSolver::_init()
     std::vector<RProblemType> problemTypes = RProblem::getTypes(problemTypeMask);
     for (uint i=0;i<problemTypes.size();i++)
     {
-        QString problemConvergenceFileName(RFileManager::getFileNameWithSuffix(this->convergenceFileName,RProblem::getId(problemTypes[i])));
+        QString problemConvergenceFileName(RFileUtils::getFileNameWithSuffix(this->convergenceFileName,RProblem::getId(problemTypes[i])));
         if (problemTypes[i] == R_PROBLEM_ACOUSTICS)
         {
             // NOT WORKING
