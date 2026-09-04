@@ -95,18 +95,19 @@ void REigenValueSolver::solve(const RSparseMatrix &M, const RSparseMatrix &K, RR
                 d[i] = std::fabs(1.0/d[i]);
             }
             std::vector<uint> indexes;
-            std::swap(d[0],d[1]);
             RUtil::qSort(d,indexes);
 
-            for (uint i=0;i<ev.getNRows();i++)
+            if (ev.getNRows() == d.getNRows())
             {
-                uint n1 = i;
-                uint n2 = indexes[i];
-                for (uint j=0;j<ev.getNColumns();j++)
+                // indexes[i] holds the original row of the i-th sorted value.
+                RRMatrix evOld(ev);
+                for (uint i=0;i<ev.getNRows();i++)
                 {
-                    std::swap(ev[n1][j],ev[n2][j]);
+                    for (uint j=0;j<ev.getNColumns();j++)
+                    {
+                        ev[i][j] = evOld[indexes[i]][j];
+                    }
                 }
-                indexes[n2] = n2;
             }
         }
         catch (const RError &error)
@@ -362,7 +363,7 @@ void REigenValueSolver::solveRayleigh(const RSparseMatrix &M, const RSparseMatri
         f *= 1.0 / norm;
 
         // (M + K*ui)*b(i+1) = K*bi/||ci||
-        solver.solve(M,f,b,R_MATRIX_PRECONDITIONER_JACOBI);
+        solver.solve(M2,f,b,R_MATRIX_PRECONDITIONER_JACOBI);
 
         // Remove K*mu from M
         for (uint i=0;i<n;i++)
@@ -446,7 +447,7 @@ void REigenValueSolver::qlDecomposition(RRVector &d, RRVector &e)
                     break;
                 }
             }
-            if (m >= l)
+            if (m == l)
             {
                 break;
             }
@@ -579,11 +580,11 @@ void REigenValueSolver::qrDecomposition(const RRMatrix &H, uint nIterations, dou
                 converged = false;
             }
         }
+        RLogger::unindent();
         if (converged)
         {
             break;
         }
-        RLogger::unindent();
     }
     for (uint i=0;i<n;i++)
     {

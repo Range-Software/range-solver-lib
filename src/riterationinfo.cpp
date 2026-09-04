@@ -89,13 +89,9 @@ void RIterationInfo::setOutputFileName(const QString &outputFileName)
 
 bool RIterationInfo::hasConverged() const
 {
-    if (!std::isnormal(this->error))
+    if (this->hasDiverged())
     {
-        return true;
-    }
-    if (!std::isnormal(this->trend))
-    {
-        return true;
+        return false;
     }
     if (this->error < this->convergenceValue)
     {
@@ -106,6 +102,11 @@ bool RIterationInfo::hasConverged() const
         return true;
     }
     return false;
+}
+
+bool RIterationInfo::hasDiverged() const
+{
+    return (!std::isfinite(this->error) || !std::isfinite(this->trend));
 }
 
 void RIterationInfo::printHeader(const QString &title) const

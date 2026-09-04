@@ -441,8 +441,9 @@ void RSolverGeneric::writeResults()
     if (this->pModel->getTimeSolver().getEnabled())
     {
         canWrite = false;
+        uint outputFrequency = this->pModel->getTimeSolver().getOutputFrequency();
         if ((this->pModel->getTimeSolver().getCurrentTimeStep()+1) == this->pModel->getTimeSolver().getNTimeSteps() ||
-            ((this->pModel->getTimeSolver().getCurrentTimeStep()+1) % this->pModel->getTimeSolver().getOutputFrequency() == 0))
+            (outputFrequency > 0 && (this->pModel->getTimeSolver().getCurrentTimeStep()+1) % outputFrequency == 0))
         {
             canWrite = true;
         }

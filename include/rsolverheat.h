@@ -68,7 +68,7 @@ class RSolverHeat : public RSolverGeneric
         void statistics() override;
 
         //! Assembly matrix
-        void assemblyMatrix(unsigned int elementID, const RRMatrix &Me, const RRMatrix &Ke, const RRVector &fe);
+        void assemblyMatrix(unsigned int elementID, const RRMatrix &Me, const RRMatrix &Ke, const RRVector &fe, RSparseMatrix &Ap, RRVector &bp);
 
         //! Get simple convection BC values.
         bool getSimpleConvection(const RElementGroup &elementGroup, double &htc, double &htt);

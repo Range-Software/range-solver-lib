@@ -92,7 +92,7 @@ class RSolverStress : public RSolverGeneric
         void generateNodeBook();
 
         //! Assembly matrix
-        void assemblyMatrix(unsigned int elementID, const RRMatrix &Me, const RRMatrix &Ke, const RRVector &fe);
+        void assemblyMatrix(unsigned int elementID, const RRMatrix &Me, const RRMatrix &Ke, const RRVector &fe, RSparseMatrix &Ap, RRVector &bp, RSparseMatrix &Mp);
 
         //! Apply local rotations to matrix.
         void applyLocalRotations(unsigned int elementID, RRMatrix &Ae);

@@ -262,6 +262,43 @@ void RScales::convert(RModel &model, bool invert) const
         areaScale = 1.0/areaScale;
         volumeScale = 1.0/volumeScale;
     }
+
+    // Collect condition components once - the list is shared read-only by
+    // the parallel workers below.
+    QList<RConditionComponent*> conditionComponents;
+    for (uint i=0;i<model.getNElementGroups();i++)
+    {
+        RElementGroup *pElementGroup = model.getElementGroupPtr(i);
+
+        // Boundary conditions
+        for (uint j=0;j<pElementGroup->getNBoundaryConditions();j++)
+        {
+            RCondition &rCondition = pElementGroup->getBoundaryCondition(j);
+            for (uint k=0;k<rCondition.size();k++)
+            {
+                conditionComponents.append(&rCondition.getComponent(k));
+            }
+        }
+        // Initial conditions
+        for (uint j=0;j<pElementGroup->getNInitialConditions();j++)
+        {
+            RCondition &rCondition = pElementGroup->getInitialCondition(j);
+            for (uint k=0;k<rCondition.size();k++)
+            {
+                conditionComponents.append(&rCondition.getComponent(k));
+            }
+        }
+        // Environment conditions
+        for (uint j=0;j<pElementGroup->getNEnvironmentConditions();j++)
+        {
+            RCondition &rCondition = pElementGroup->getEnvironmentCondition(j);
+            for (uint k=0;k<rCondition.size();k++)
+            {
+                conditionComponents.append(&rCondition.getComponent(k));
+            }
+        }
+    }
+
 #pragma omp parallel default(shared)
     {
         // Scale nodes
@@ -295,44 +332,6 @@ void RScales::convert(RModel &model, bool invert) const
         }
 
         // Scale conditions.
-        QList<RConditionComponent*> conditionComponents;
-
-#pragma omp critical
-        {
-            for (uint i=0;i<model.getNElementGroups();i++)
-            {
-                RElementGroup *pElementGroup = model.getElementGroupPtr(i);
-
-                // Boundary conditions
-                for (uint i=0;i<pElementGroup->getNBoundaryConditions();i++)
-                {
-                    RCondition &rCondition = pElementGroup->getBoundaryCondition(i);
-                    for (uint j=0;j<rCondition.size();j++)
-                    {
-                        conditionComponents.append(&rCondition.getComponent(j));
-                    }
-                }
-                // Initial conditions
-                for (uint i=0;i<pElementGroup->getNInitialConditions();i++)
-                {
-                    RCondition &rCondition = pElementGroup->getInitialCondition(i);
-                    for (uint j=0;j<rCondition.size();j++)
-                    {
-                        conditionComponents.append(&rCondition.getComponent(j));
-                    }
-                }
-                // Environment conditions
-                for (uint i=0;i<pElementGroup->getNEnvironmentConditions();i++)
-                {
-                    RCondition &rCondition = pElementGroup->getEnvironmentCondition(i);
-                    for (uint j=0;j<rCondition.size();j++)
-                    {
-                        conditionComponents.append(&rCondition.getComponent(j));
-                    }
-                }
-            }
-        }
-
 #pragma omp for
         for (int i=0;i<conditionComponents.size();i++)
         {

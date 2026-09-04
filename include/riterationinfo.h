@@ -71,6 +71,9 @@ class RIterationInfo
         //! Return true if iterations have converged.
         bool hasConverged() const;
 
+        //! Return true if iterations have diverged (error or trend is not finite).
+        bool hasDiverged() const;
+
         //! Print header.
         void printHeader(const QString &title) const;
 

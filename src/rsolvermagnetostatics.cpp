@@ -1,3 +1,7 @@
+#include <atomic>
+
+#include <omp.h>
+
 #include "rsolvermagnetostatics.h"
 #include "rmatrixsolver.h"
 
@@ -49,20 +53,32 @@ void RSolverMagnetostatics::prepare()
     this->x.resize(3*this->nodeBook.getNEnabled());
 
     this->A.clear();
+    this->A.setNRows(this->b.size());
     this->b.fill(0.0);
     this->x.fill(0.0);
+
+    // Per-thread assembly buffers - elements are assembled without
+    // synchronization and merged into A/b once at the end.
+    int np = omp_get_max_threads();
+    std::vector<RSparseMatrix> Ap(np);
+    std::vector<RRVector> bp(np);
+    for (int t=0;t<np;t++)
+    {
+        Ap[t].setNRows(this->b.size());
+        bp[t].resize(this->b.size());
+        bp[t].fill(0.0);
+    }
 
     // Prepare volume elements.
     for (uint i=0;i<this->pModel->getNVolumes();i++)
     {
         RVolume &volume = this->pModel->getVolume(i);
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(volume.size());j++)
         {
-            #pragma omp flush (abort)
-            if (abort)
+            if (abort.load(std::memory_order_relaxed))
             {
                 continue;
             }
@@ -123,10 +139,7 @@ void RSolverMagnetostatics::prepare()
                         fe[3*m+2] += feValue * jsz;
                     }
                 }
-                #pragma omp critical
-                {
-                    this->assemblyMatrix(elementID,Ke,fe);
-                }
+                this->assemblyMatrix(elementID,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -142,6 +155,17 @@ void RSolverMagnetostatics::prepare()
             throw RError(RError::Type::Application,R_ERROR_REF,"Failed to prepare matrix system.");
         }
     }
+
+    // Merge per-thread assembly buffers.
+    #pragma omp parallel for default(shared)
+    for (int64_t i=0;i<int64_t(this->A.getNRows());i++)
+    {
+        for (int t=0;t<np;t++)
+        {
+            this->A.getVector(uint(i)).addVector(Ap[t].getVector(uint(i)));
+            this->b[uint(i)] += bp[t][uint(i)];
+        }
+    }
 }
 
 void RSolverMagnetostatics::solve()
@@ -153,10 +177,10 @@ void RSolverMagnetostatics::solve()
         matrixSolver.solve(this->A,this->b,this->x,R_MATRIX_PRECONDITIONER_JACOBI,1);
         RLogger::unindent();
     }
-    catch (RError error)
+    catch (const RError &)
     {
         RLogger::unindent();
-        throw error;
+        throw;
     }
 
     this->nodeMagneticField.x.resize(this->pModel->getNNodes(),0.0);
@@ -231,7 +255,7 @@ void RSolverMagnetostatics::statistics()
     this->processMonitoringPoints();
 }
 
-void RSolverMagnetostatics::assemblyMatrix(unsigned int elementID, const RRMatrix &Ke, const RRVector &fe)
+void RSolverMagnetostatics::assemblyMatrix(unsigned int elementID, const RRMatrix &Ke, const RRVector &fe, RSparseMatrix &Ap, RRVector &bp)
 {
     const RElement &element = this->pModel->getElement(elementID);
 
@@ -260,26 +284,26 @@ void RSolverMagnetostatics::assemblyMatrix(unsigned int elementID, const RRMatri
 
         if (this->nodeBook.getValue(element.getNodeId(m),mp))
         {
-            this->b[3*mp+0] += be[3*m+0];
-            this->b[3*mp+1] += be[3*m+1];
-            this->b[3*mp+2] += be[3*m+2];
+            bp[3*mp+0] += be[3*m+0];
+            bp[3*mp+1] += be[3*m+1];
+            bp[3*mp+2] += be[3*m+2];
             for (uint n=0;n<element.size();n++)
             {
                 uint np = 0;
 
                 if (this->nodeBook.getValue(element.getNodeId(n),np))
                 {
-                    this->A.addValue(3*mp+0,3*np+0,Ke[3*m+0][3*n+0]);
-                    this->A.addValue(3*mp+1,3*np+0,Ke[3*m+1][3*n+0]);
-                    this->A.addValue(3*mp+2,3*np+0,Ke[3*m+2][3*n+0]);
+                    Ap.addValue(3*mp+0,3*np+0,Ke[3*m+0][3*n+0]);
+                    Ap.addValue(3*mp+1,3*np+0,Ke[3*m+1][3*n+0]);
+                    Ap.addValue(3*mp+2,3*np+0,Ke[3*m+2][3*n+0]);
 
-                    this->A.addValue(3*mp+0,3*np+1,Ke[3*m+0][3*n+1]);
-                    this->A.addValue(3*mp+1,3*np+1,Ke[3*m+1][3*n+1]);
-                    this->A.addValue(3*mp+2,3*np+1,Ke[3*m+2][3*n+1]);
+                    Ap.addValue(3*mp+0,3*np+1,Ke[3*m+0][3*n+1]);
+                    Ap.addValue(3*mp+1,3*np+1,Ke[3*m+1][3*n+1]);
+                    Ap.addValue(3*mp+2,3*np+1,Ke[3*m+2][3*n+1]);
 
-                    this->A.addValue(3*mp+0,3*np+2,Ke[3*m+0][3*n+2]);
-                    this->A.addValue(3*mp+1,3*np+2,Ke[3*m+1][3*n+2]);
-                    this->A.addValue(3*mp+2,3*np+2,Ke[3*m+2][3*n+2]);
+                    Ap.addValue(3*mp+0,3*np+2,Ke[3*m+0][3*n+2]);
+                    Ap.addValue(3*mp+1,3*np+2,Ke[3*m+1][3*n+2]);
+                    Ap.addValue(3*mp+2,3*np+2,Ke[3*m+2][3*n+2]);
                 }
             }
         }

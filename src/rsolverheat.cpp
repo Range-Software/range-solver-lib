@@ -1,3 +1,7 @@
+#include <atomic>
+
+#include <omp.h>
+
 #include "rsolverheat.h"
 #include "rconvection.h"
 #include "rmatrixsolver.h"
@@ -79,19 +83,34 @@ void RSolverHeat::prepare()
 
     this->pModel->convertElementToNodeVector(this->elementTemperature,temperatureSetValues,this->nodeTemperature,true);
 
-    this->b.resize(this->nodeBook.getNEnabled());
-    this->x.resize(this->nodeBook.getNEnabled());
+    uint nEnabled = this->nodeBook.getNEnabled();
+
+    this->b.resize(nEnabled);
+    this->x.resize(nEnabled);
 
     this->A.clear();
+    this->A.setNRows(nEnabled);
     this->b.fill(0.0);
     this->x.fill(0.0);
+
+    // Per-thread assembly buffers - elements are assembled without
+    // synchronization and merged into A/b once at the end.
+    int np = omp_get_max_threads();
+    std::vector<RSparseMatrix> Ap(np);
+    std::vector<RRVector> bp(np);
+    for (int t=0;t<np;t++)
+    {
+        Ap[t].setNRows(nEnabled);
+        bp[t].resize(nEnabled);
+        bp[t].fill(0.0);
+    }
 
     // Prepare point elements.
     for (uint i=0;i<this->pModel->getNPoints();i++)
     {
         RPoint &point = this->pModel->getPoint(i);
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(point.size());j++)
         {
@@ -141,10 +160,7 @@ void RSolverHeat::prepare()
                         fe[m] += (this->elementHeat[elementID] + this->elementJouleHeat[elementID]) * N[m] * detJ * shapeFunc.getW();
                     }
                 }
-                #pragma omp critical
-                {
-                    this->assemblyMatrix(elementID,Me,Ke,fe);
-                }
+                this->assemblyMatrix(elementID,Me,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -166,7 +182,7 @@ void RSolverHeat::prepare()
     {
         RLine &line = this->pModel->getLine(i);
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(line.size());j++)
         {
@@ -200,6 +216,7 @@ void RSolverHeat::prepare()
                     RRMatrix J, Rt;
                     double detJ = this->pModel->getElement(elementID).findJacobian(this->pModel->getNodes(),k,J,Rt);
 
+                    B.fill(0.0);
                     for (uint m=0;m<dN.getNRows();m++)
                     {
                         B[m][0] += dN[m][0]*J[0][0];
@@ -229,10 +246,7 @@ void RSolverHeat::prepare()
                         fe[m] += (this->elementHeat[elementID] + this->elementJouleHeat[elementID]) * N[m] * detJ * shapeFunc.getW();
                     }
                 }
-                #pragma omp critical
-                {
-                    this->assemblyMatrix(elementID,Me,Ke,fe);
-                }
+                this->assemblyMatrix(elementID,Me,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -254,13 +268,13 @@ void RSolverHeat::prepare()
     {
         RSurface &surface = this->pModel->getSurface(i);
 
-        double htc = 0.0;
-        double htt = 0.0;
+        double surfaceHtc = 0.0;
+        double surfaceHtt = 0.0;
 
-        this->getSimpleConvection(surface,htc,htt);
-        this->getForcedConvection(surface,htc,htt);
+        this->getSimpleConvection(surface,surfaceHtc,surfaceHtt);
+        this->getForcedConvection(surface,surfaceHtc,surfaceHtt);
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(surface.size());j++)
         {
@@ -281,6 +295,10 @@ void RSolverHeat::prepare()
                 RRVector fe(element.size());
                 RRMatrix B(element.size(),2);
 
+                // htc/htt must be per-iteration - getNaturalConvection()
+                // overwrites them per element and the loop runs in parallel.
+                double htc = surfaceHtc;
+                double htt = surfaceHtt;
                 this->getNaturalConvection(surface,elementID,htc,htt);
 
                 Me.fill(0.0);
@@ -338,10 +356,7 @@ void RSolverHeat::prepare()
                         fe[m] += htc * htt * elementArea / element.size();
                     }
                 }
-                #pragma omp critical
-                {
-                    this->assemblyMatrix(elementID,Me,Ke,fe);
-                }
+                this->assemblyMatrix(elementID,Me,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -363,12 +378,11 @@ void RSolverHeat::prepare()
     {
         RVolume &volume = this->pModel->getVolume(i);
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(volume.size());j++)
         {
-            #pragma omp flush (abort)
-            if (abort)
+            if (abort.load(std::memory_order_relaxed))
             {
                 continue;
             }
@@ -434,10 +448,7 @@ void RSolverHeat::prepare()
                         fe[m] += (this->elementHeat[elementID] + this->elementJouleHeat[elementID]) * N[m] * detJ * shapeFunc.getW();
                     }
                 }
-                #pragma omp critical
-                {
-                    this->assemblyMatrix(elementID,Me,Ke,fe);
-                }
+                this->assemblyMatrix(elementID,Me,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -453,6 +464,17 @@ void RSolverHeat::prepare()
             throw RError(RError::Type::Application,R_ERROR_REF,"Failed to prepare matrix system.");
         }
     }
+
+    // Merge per-thread assembly buffers.
+    #pragma omp parallel for default(shared)
+    for (int64_t i=0;i<int64_t(this->A.getNRows());i++)
+    {
+        for (int t=0;t<np;t++)
+        {
+            this->A.getVector(uint(i)).addVector(Ap[t].getVector(uint(i)));
+            this->b[uint(i)] += bp[t][uint(i)];
+        }
+    }
 }
 
 void RSolverHeat::solve()
@@ -464,10 +486,10 @@ void RSolverHeat::solve()
         matrixSolver.solve(this->A,this->b,this->x,R_MATRIX_PRECONDITIONER_JACOBI,1);
         RLogger::unindent();
     }
-    catch (RError error)
+    catch (const RError &)
     {
         RLogger::unindent();
-        throw error;
+        throw;
     }
 
     for (uint i=0;i<this->pModel->getNNodes();i++)
@@ -752,7 +774,7 @@ void RSolverHeat::statistics()
     this->processMonitoringPoints();
 }
 
-void RSolverHeat::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRMatrix &Ke, const RRVector &fe)
+void RSolverHeat::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRMatrix &Ke, const RRVector &fe, RSparseMatrix &Ap, RRVector &bp)
 {
     double alpha = this->pModel->getTimeSolver().getTimeMarchApproximationCoefficient();
     double dt = this->pModel->getTimeSolver().getCurrentTimeStepSize();
@@ -805,14 +827,14 @@ void RSolverHeat::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRMat
 
         if (this->nodeBook.getValue(element.getNodeId(m),mp))
         {
-            this->b[mp] += be[m];
+            bp[mp] += be[m];
             for (uint n=0;n<element.size();n++)
             {
                 uint np = 0;
 
                 if (this->nodeBook.getValue(element.getNodeId(n),np))
                 {
-                    this->A.addValue(mp,np,Ae[m][n]);
+                    Ap.addValue(mp,np,Ae[m][n]);
                 }
             }
         }

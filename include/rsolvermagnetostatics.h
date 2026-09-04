@@ -51,7 +51,7 @@ class RSolverMagnetostatics : public RSolverGeneric
         void statistics() override;
 
         //! Assembly matrix
-        void assemblyMatrix(unsigned int elementID, const RRMatrix &Ke, const RRVector &fe);
+        void assemblyMatrix(unsigned int elementID, const RRMatrix &Ke, const RRVector &fe, RSparseMatrix &Ap, RRVector &bp);
 
 };
 

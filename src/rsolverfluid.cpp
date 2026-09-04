@@ -333,6 +333,8 @@ void RSolverFluid::prepare()
     if (this->meshChanged)
     {
         this->computeElementScales();
+        // Node positions changed - cached derivatives are stale.
+        this->clearShapeDerivatives();
         this->computeShapeDerivatives();
     }
     if (this->taskIteration == 0)
@@ -358,16 +360,24 @@ void RSolverFluid::prepare()
 
     int np = omp_get_max_threads();
 
-    QVector<RSparseMatrix> Ap;
-    Ap.resize(np);
-    QVector<RRVector> bp;
-    bp.resize(np);
+    // Per-thread assembly buffers are members - copying the matrix pattern
+    // into them is only needed when the pattern itself was rebuilt.
+    std::vector<RSparseMatrix> &Ap = this->threadAssemblyMatrices;
+    std::vector<RRVector> &bp = this->threadAssemblyVectors;
 
+    if (this->taskIteration == 0 || this->meshChanged || int(Ap.size()) != np)
+    {
+        Ap.resize(np);
+        bp.resize(np);
+        for (int i=0;i<np;i++)
+        {
+            Ap[i] = this->A;
+            bp[i].resize(this->nodeBook.getNEnabled());
+        }
+    }
     for (int i=0;i<np;i++)
     {
-        Ap[i] = this->A;
         Ap[i].fillValues(0.0);
-        bp[i].resize(this->nodeBook.getNEnabled());
         bp[i].fill(0.0);
     }
 
@@ -511,10 +521,10 @@ void RSolverFluid::solve()
         matrixSolver.solve(this->A,this->b,this->x,R_MATRIX_PRECONDITIONER_JACOBI,1);
         RLogger::unindent();
     }
-    catch (RError error)
+    catch (const RError &)
     {
         RLogger::unindent();
-        throw error;
+        throw;
     }
 
     this->solverStopWatch.pause();
@@ -738,13 +748,6 @@ void RSolverFluid::statistics()
     double residual = RRVector::euclideanNorm(this->b)*scale;
     double convergence = residual - this->statsOldResidual;
     this->statsOldResidual = residual;
-
-    // Validation checksums for optimization verification
-    double vxNorm = RRVector::euclideanNorm(this->nodeVelocity.x);
-    double vyNorm = RRVector::euclideanNorm(this->nodeVelocity.y);
-    double vzNorm = RRVector::euclideanNorm(this->nodeVelocity.z);
-    double pNorm = RRVector::euclideanNorm(this->nodePressure);
-    RLogger::info("VALIDATION: ||vx||=%.15e ||vy||=%.15e ||vz||=%.15e ||p||=%.15e\n", vxNorm, vyNorm, vzNorm, pNorm);
 
     std::vector<RIterationInfoValue> cvgValues;
     cvgValues.push_back(RIterationInfoValue("Solver residual",residual));
@@ -1298,6 +1301,7 @@ void RSolverFluid::clearShapeDerivatives()
     {
         delete this->shapeDerivations[i];
     }
+    this->shapeDerivations.clear();
 }
 
 void RSolverFluid::computeElement(unsigned int elementID, RRMatrix &Ae, RRVector &be, RMatrixManager<FluidMatrixContainer> &matrixManager)

@@ -57,6 +57,10 @@ void RHemiCube::_init(const RHemiCube *pHemiCube)
     if (pHemiCube)
     {
         this->eyeDirection = pHemiCube->eyeDirection;
+        for (uint i=0;i<this->sectors.size();i++)
+        {
+            delete this->sectors[i];
+        }
         this->sectors.resize(pHemiCube->sectors.size());
         for (uint i=0;i<pHemiCube->sectors.size();i++)
         {
@@ -87,7 +91,10 @@ RHemiCube::~RHemiCube()
 
 RHemiCube &RHemiCube::operator =(const RHemiCube &hemiCube)
 {
-    this->_init(&hemiCube);
+    if (this != &hemiCube)
+    {
+        this->_init(&hemiCube);
+    }
     return (*this);
 }
 
@@ -181,7 +188,9 @@ void RHemiCube::calculateViewFactors(const RModel &model, RViewFactorMatrix &rVi
     uint nPatchesProcessed = 0;
 
     RProgressInitialize("Calculating view-factors");
-    #pragma omp parallel for default(shared)
+    // Dynamic schedule: emitter patches do orders of magnitude more work
+    // than non-emitters, so a static split leaves threads idle.
+    #pragma omp parallel for schedule(dynamic) default(shared)
     for (int64_t eyePatchID=0;eyePatchID<int64_t(rPatchBook.getNPatches());eyePatchID++)
     {
         RViewFactorRow &rViewFactorRow = rViewFactorMatrix.getRow(eyePatchID);

@@ -1,3 +1,7 @@
+#include <atomic>
+
+#include <omp.h>
+
 #include "rsolverelectrostatics.h"
 #include "rmatrixsolver.h"
 
@@ -59,15 +63,28 @@ void RSolverElectrostatics::prepare()
     this->x.resize(this->nodeBook.getNEnabled());
 
     this->A.clear();
+    this->A.setNRows(this->b.size());
     this->b.fill(0.0);
     this->x.fill(0.0);
+
+    // Per-thread assembly buffers - elements are assembled without
+    // synchronization and merged into A/b once at the end.
+    int np = omp_get_max_threads();
+    std::vector<RSparseMatrix> Ap(np);
+    std::vector<RRVector> bp(np);
+    for (int t=0;t<np;t++)
+    {
+        Ap[t].setNRows(this->b.size());
+        bp[t].resize(this->b.size());
+        bp[t].fill(0.0);
+    }
 
     // Prepare point elements.
     for (uint i=0;i<this->pModel->getNPoints();i++)
     {
         RPoint &point = this->pModel->getPoint(i);
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(point.size());j++)
         {
@@ -102,10 +119,7 @@ void RSolverElectrostatics::prepare()
                         fe[m] += elementChargeDensity[elementID] * N[m] * detJ * shapeFunc.getW();
                     }
                 }
-                #pragma omp critical
-                {
-                    this->assemblyMatrix(elementID,Ke,fe);
-                }
+                this->assemblyMatrix(elementID,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -127,7 +141,7 @@ void RSolverElectrostatics::prepare()
     {
         RLine &line = this->pModel->getLine(i);
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(line.size());j++)
         {
@@ -180,10 +194,7 @@ void RSolverElectrostatics::prepare()
                         fe[m] -= elementChargeDensity[elementID] * N[m] * detJ * shapeFunc.getW();
                     }
                 }
-                #pragma omp critical
-                {
-                    this->assemblyMatrix(elementID,Ke,fe);
-                }
+                this->assemblyMatrix(elementID,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -205,7 +216,7 @@ void RSolverElectrostatics::prepare()
     {
         RSurface &surface = this->pModel->getSurface(i);
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(surface.size());j++)
         {
@@ -259,10 +270,7 @@ void RSolverElectrostatics::prepare()
                         fe[m] -= elementChargeDensity[elementID] * N[m] * detJ * shapeFunc.getW();
                     }
                 }
-                #pragma omp critical
-                {
-                    this->assemblyMatrix(elementID,Ke,fe);
-                }
+                this->assemblyMatrix(elementID,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -284,12 +292,11 @@ void RSolverElectrostatics::prepare()
     {
         RVolume &volume = this->pModel->getVolume(i);
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(volume.size());j++)
         {
-            #pragma omp flush (abort)
-            if (abort)
+            if (abort.load(std::memory_order_relaxed))
             {
                 continue;
             }
@@ -344,10 +351,7 @@ void RSolverElectrostatics::prepare()
                         fe[m] -= elementChargeDensity[elementID] * N[m] * detJ * shapeFunc.getW();
                     }
                 }
-                #pragma omp critical
-                {
-                    this->assemblyMatrix(elementID,Ke,fe);
-                }
+                this->assemblyMatrix(elementID,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -363,6 +367,17 @@ void RSolverElectrostatics::prepare()
             throw RError(RError::Type::Application,R_ERROR_REF,"Failed to prepare matrix system.");
         }
     }
+
+    // Merge per-thread assembly buffers.
+    #pragma omp parallel for default(shared)
+    for (int64_t i=0;i<int64_t(this->A.getNRows());i++)
+    {
+        for (int t=0;t<np;t++)
+        {
+            this->A.getVector(uint(i)).addVector(Ap[t].getVector(uint(i)));
+            this->b[uint(i)] += bp[t][uint(i)];
+        }
+    }
 }
 
 void RSolverElectrostatics::solve()
@@ -374,10 +389,10 @@ void RSolverElectrostatics::solve()
         matrixSolver.solve(this->A,this->b,this->x,R_MATRIX_PRECONDITIONER_JACOBI,1);
         RLogger::unindent();
     }
-    catch (RError error)
+    catch (const RError &)
     {
         RLogger::unindent();
-        throw error;
+        throw;
     }
 
     for (uint i=0;i<this->pModel->getNNodes();i++)
@@ -790,7 +805,7 @@ void RSolverElectrostatics::statistics()
     this->processMonitoringPoints();
 }
 
-void RSolverElectrostatics::assemblyMatrix(unsigned int elementID, const RRMatrix &Ke, const RRVector &fe)
+void RSolverElectrostatics::assemblyMatrix(unsigned int elementID, const RRMatrix &Ke, const RRVector &fe, RSparseMatrix &Ap, RRVector &bp)
 {
     const RElement &element = this->pModel->getElement(elementID);
 
@@ -818,14 +833,14 @@ void RSolverElectrostatics::assemblyMatrix(unsigned int elementID, const RRMatri
 
         if (this->nodeBook.getValue(element.getNodeId(m),mp))
         {
-            this->b[mp] += be[m];
+            bp[mp] += be[m];
             for (uint n=0;n<element.size();n++)
             {
                 uint np = 0;
 
                 if (this->nodeBook.getValue(element.getNodeId(n),np))
                 {
-                    this->A.addValue(mp,np,Ae[m][n]);
+                    Ap.addValue(mp,np,Ae[m][n]);
                 }
             }
         }

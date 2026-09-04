@@ -1,4 +1,5 @@
 #include <cmath>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -96,11 +97,30 @@ bool refreshSparseMatrixCache(const RSparseMatrix &A, SparseMatrixCache &cache)
     return true;
 }
 
-const SparseMatrixCache &findSparseMatrixCache(const RSparseMatrix &A)
+//! Return CSR cache for given matrix.
+//! When allowRefresh is false an existing cache with a matching shape is
+//! returned as-is — used by solveCG/solveGMRES which are only called from
+//! solve() right after the cache has been refreshed.
+const SparseMatrixCache &findSparseMatrixCache(const RSparseMatrix &A, bool allowRefresh = true)
 {
+    static std::mutex cachesMutex;
     static std::unordered_map<const RSparseMatrix*,SparseMatrixCache> caches;
+    static const size_t maxCachedMatrices = 16;
+
+    std::lock_guard<std::mutex> lock(cachesMutex);
+
+    if (caches.find(&A) == caches.end() && caches.size() >= maxCachedMatrices)
+    {
+        // Bound memory usage - drop stale entries (matrices are keyed by
+        // address, so destroyed matrices would otherwise accumulate forever).
+        caches.clear();
+    }
 
     SparseMatrixCache &cache = caches[&A];
+    if (!allowRefresh && cache.nRows == A.getNRows() && cache.rowPtr.size() == A.getNRows()+1)
+    {
+        return cache;
+    }
     if (!refreshSparseMatrixCache(A,cache))
     {
         cache = buildSparseMatrixCache(A);
@@ -208,7 +228,7 @@ void RMatrixSolver::disableConvergenceLogFile()
 void RMatrixSolver::solveCG(const RSparseMatrix &A, const RRVector &b, RRVector &x, RMatrixPreconditioner &P)
 {
     unsigned int m = A.getNRows();
-    const SparseMatrixCache &matrix = findSparseMatrixCache(A);
+    const SparseMatrixCache &matrix = findSparseMatrixCache(A,false);
 
     RRVector r(m);
     RRVector z(m);
@@ -270,8 +290,11 @@ void RMatrixSolver::solveCG(const RSparseMatrix &A, const RRVector &b, RRVector 
             {
                 if (it > 0)
                 {
+                    if (std::abs(ro1) < RConstants::eps)
+                    {
+                        ro1 = (ro1 < 0.0) ? -RConstants::eps : RConstants::eps;
+                    }
                     beta = ro0 / ro1;
-                    ro1 = std::max(ro1,RConstants::eps);
                 }
             }
 #pragma omp barrier
@@ -346,7 +369,7 @@ void RMatrixSolver::solveCG(const RSparseMatrix &A, const RRVector &b, RRVector 
             }
 
 #pragma omp barrier
-            if (this->iterationInfo.hasConverged())
+            if (this->iterationInfo.hasConverged() || this->iterationInfo.hasDiverged())
             {
                 break;
             }
@@ -357,7 +380,7 @@ void RMatrixSolver::solveCG(const RSparseMatrix &A, const RRVector &b, RRVector 
 void RMatrixSolver::solveGMRES(const RSparseMatrix &A, const RRVector &b, RRVector &x, RMatrixPreconditioner &P)
 {
     uint mA = A.getNRows();
-    const SparseMatrixCache &matrix = findSparseMatrixCache(A);
+    const SparseMatrixCache &matrix = findSparseMatrixCache(A,false);
     uint nouter = this->matrixSolverConf.getNOuterIterations();
     uint ninner = this->matrixSolverConf.getNInnerIterations();
 
@@ -421,7 +444,7 @@ void RMatrixSolver::solveGMRES(const RSparseMatrix &A, const RRVector &b, RRVect
                 this->iterationInfo.printIteration();
             }
 #pragma omp barrier
-            if (this->iterationInfo.hasConverged())
+            if (this->iterationInfo.hasConverged() || this->iterationInfo.hasDiverged())
             {
                 break;
             }

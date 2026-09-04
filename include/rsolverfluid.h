@@ -69,6 +69,11 @@ class RSolverFluid : public RSolverGeneric
         //! Cached global RHS positions for each element-local vector entry.
         std::vector<std::vector<uint>> elementVectorPositions;
 
+        //! Per-thread assembly buffers.
+        //! Rebuilt only when the sparse matrix pattern changes.
+        std::vector<RSparseMatrix> threadAssemblyMatrices;
+        std::vector<RRVector> threadAssemblyVectors;
+
         //! Stop-watches
         RStopWatch recoveryStopWatch;
         RStopWatch buildStopWatch;

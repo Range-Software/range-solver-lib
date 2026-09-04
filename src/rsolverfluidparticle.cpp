@@ -1,3 +1,5 @@
+#include <atomic>
+
 #include <omp.h>
 
 #include "rsolverfluid.h"
@@ -181,7 +183,7 @@ void RSolverFluidParticle::prepare()
         bp[i].fill(0.0);
     }
 
-    bool abort = false;
+    std::atomic<bool> abort{false};
 
     RMatrixManager<FluidParticleMatrixContainer> matrixManager;
 
@@ -195,8 +197,7 @@ void RSolverFluidParticle::prepare()
 
         const RElement &element = this->pModel->getElement(elementID);
 
-        #pragma omp flush (abort)
-        if (abort)
+        if (abort.load(std::memory_order_relaxed))
         {
             continue;
         }
@@ -224,7 +225,6 @@ void RSolverFluidParticle::prepare()
                 RLogger::error("%s\n",rError.getMessage().toUtf8().constData());
                 abort = true;
             }
-            #pragma omp flush (abort)
         }
     }
 
@@ -267,10 +267,10 @@ void RSolverFluidParticle::solve()
         matrixSolver.solve(this->A,this->b,this->x,R_MATRIX_PRECONDITIONER_JACOBI,1);
         RLogger::unindent();
     }
-    catch (RError error)
+    catch (const RError &)
     {
         RLogger::unindent();
-        throw error;
+        throw;
     }
 
     this->solverStopWatch.pause();

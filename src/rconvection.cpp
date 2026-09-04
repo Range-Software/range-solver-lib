@@ -219,7 +219,8 @@ double RConvection::calculateNu() const
     {
         case R_CONVECTION_NATURAL_EXTERNAL_VERTICAL_PLANE:
         case R_CONVECTION_NATURAL_EXTERNAL_VERTICAL_CYLINDER:
-            if (Ra <= 1.0e-9)
+            // Churchill & Chu: laminar branch up to Ra = 1e9, turbulent above.
+            if (Ra <= 1.0e9)
             {
                 Nu = 0.68 + (0.67*pow(Ra,1.0/4.0))/pow(1.0 + pow(0.492/Pr, 9.0/16.0),4.0/9.0);
             }
@@ -233,19 +234,16 @@ double RConvection::calculateNu() const
             // Upper hot plate / lower cold plate (Churchill & Chu):
             //   Ra < 2e7  → Nu = 0.54 * Ra^(1/4)
             //   Ra >= 2e7 → Nu = 0.14 * Ra^(1/3)
-            // Lower hot plate / upper cold plate:
-            //   3e5 <= Ra < 3e10 → Nu = 0.27 * Ra^(1/4)
+            // The lower hot plate / upper cold plate correlation
+            // (Nu = 0.27 * Ra^(1/4)) would require plate orientation
+            // information which is not available here.
             if (Ra < 2.0e7)
             {
                 Nu = 0.54*pow(Ra,1.0/4.0);
             }
-            else if (Ra < 3.0e10)
-            {
-                Nu = 0.14*pow(Ra,1.0/3.0);
-            }
             else
             {
-                Nu = 0.27*pow(Ra,1.0/4.0);
+                Nu = 0.14*pow(Ra,1.0/3.0);
             }
             break;
         case R_CONVECTION_NATURAL_EXTERNAL_HORIZONTAL_CYLINDER:

@@ -195,11 +195,10 @@ void RSolverRadiativeHeat::prepare()
     }
 
     // Prepare patch elements.
-    // viewFactors is allocated once per thread outside the j-loop (PERF-3).
-    // b[i] is accumulated locally; only A.addValue needs a critical section since
-    // RSparseMatrix row-insertion may not be thread-safe across rows (PERF-12).
-    // Each outer iteration owns a unique i so b[i] writes are race-free (BUG-6/7).
+    // Rows are pre-allocated so each outer iteration only touches its own
+    // row i - no synchronization is needed inside the loop.
     uint nPatches = rPatchBook.getNPatches();
+    this->A.setNRows(nPatches);
     #pragma omp parallel for default(shared)
     for (int64_t i=0;i<int64_t(nPatches);i++)
     {
@@ -225,10 +224,7 @@ void RSolverRadiativeHeat::prepare()
 
             bi -= Bij * std::pow(patchTemperature[j],4);
 
-            #pragma omp critical
-            {
-                this->A.addValue(i,j,Aij);
-            }
+            this->A.addValue(i,j,Aij);
         }
 
         // Ambient radiative heat flux
@@ -248,10 +244,10 @@ void RSolverRadiativeHeat::solve()
         matrixSolver.solve(this->A,this->b,this->x,R_MATRIX_PRECONDITIONER_JACOBI,1);
         RLogger::unindent();
     }
-    catch (RError error)
+    catch (const RError &)
     {
         RLogger::unindent();
-        throw error;
+        throw;
     }
 
     const RPatchBook &rPatchBook = this->viewFactorMatrix.getPatchBook();
@@ -286,7 +282,7 @@ void RSolverRadiativeHeat::process()
         {
             double elementArea;
             double ratio = 0.0;
-            if (this->pModel->getElement(elementIDs[j]).findArea(this->pModel->getNodes(),elementArea))
+            if (patchArea > 0.0 && this->pModel->getElement(elementIDs[j]).findArea(this->pModel->getNodes(),elementArea))
             {
                 ratio = elementArea / patchArea;
             }

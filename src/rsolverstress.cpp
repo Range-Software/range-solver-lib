@@ -1,4 +1,7 @@
+#include <atomic>
 #include <cmath>
+
+#include <omp.h>
 
 #include "rsolverstress.h"
 #include "rmatrixsolver.h"
@@ -122,9 +125,25 @@ void RSolverStress::prepare()
     this->x.resize(this->nodeBook.getNEnabled());
 
     this->M.clear();
+    this->M.setNRows(this->b.size());
     this->A.clear();
+    this->A.setNRows(this->b.size());
     this->b.fill(0.0);
     this->x.fill(0.0);
+
+    // Per-thread assembly buffers - elements are assembled without
+    // synchronization and merged into A/b (and M for modal) at the end.
+    int np = omp_get_max_threads();
+    std::vector<RSparseMatrix> Ap(np);
+    std::vector<RSparseMatrix> Mp(np);
+    std::vector<RRVector> bp(np);
+    for (int t=0;t<np;t++)
+    {
+        Ap[t].setNRows(this->b.size());
+        Mp[t].setNRows(this->b.size());
+        bp[t].resize(this->b.size());
+        bp[t].fill(0.0);
+    }
 
     this->pModel->convertElementToNodeVector(elementDisplacement.x,displacementSetValues.x,this->nodeDisplacement.x,true);
     this->pModel->convertElementToNodeVector(elementDisplacement.y,displacementSetValues.y,this->nodeDisplacement.y,true);
@@ -176,12 +195,11 @@ void RSolverStress::prepare()
         RPoint &point = this->pModel->getPoint(i);
         double pointVolume = point.getVolume();
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(point.size());j++)
         {
-            #pragma omp flush (abort)
-            if (abort)
+            if (abort.load(std::memory_order_relaxed))
             {
                 continue;
             }
@@ -226,10 +244,7 @@ void RSolverStress::prepare()
                     Me *= this->elementDensity[elementID] * pointVolume;
                 }
 
-                #pragma omp critical
-                {
-                    this->assemblyMatrix(elementID,Me,Ke,fe);
-                }
+                this->assemblyMatrix(elementID,Me,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())],Mp[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -238,7 +253,6 @@ void RSolverStress::prepare()
                     RLogger::error("%s\n",rError.getMessage().toUtf8().constData());
                     abort = true;
                 }
-                #pragma omp flush (abort)
             }
         }
         if (abort)
@@ -253,12 +267,11 @@ void RSolverStress::prepare()
         RLine &line = this->pModel->getLine(i);
         double lineCrossArea = line.getCrossArea();
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(line.size());j++)
         {
-            #pragma omp flush (abort)
-            if (abort)
+            if (abort.load(std::memory_order_relaxed))
             {
                 continue;
             }
@@ -360,10 +373,7 @@ void RSolverStress::prepare()
                         }
                     }
                 }
-                #pragma omp critical
-                {
-                    this->assemblyMatrix(elementID,Me,Ke,fe);
-                }
+                this->assemblyMatrix(elementID,Me,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())],Mp[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -372,7 +382,6 @@ void RSolverStress::prepare()
                     RLogger::error("%s\n",rError.getMessage().toUtf8().constData());
                     abort = true;
                 }
-                #pragma omp flush (abort)
             }
         }
         if (abort)
@@ -388,12 +397,11 @@ void RSolverStress::prepare()
         double surfaceArea = surface.findArea(this->pModel->getNodes(),this->pModel->getElements());
         double surfaceThickness = surface.getThickness();
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(surface.size());j++)
         {
-            #pragma omp flush (abort)
-            if (abort)
+            if (abort.load(std::memory_order_relaxed))
             {
                 continue;
             }
@@ -549,10 +557,7 @@ void RSolverStress::prepare()
                         Ke.fill(0.0);
                     }
                 }
-                #pragma omp critical
-                {
-                    this->assemblyMatrix(elementID,Me,Ke,fe);
-                }
+                this->assemblyMatrix(elementID,Me,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())],Mp[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -561,7 +566,6 @@ void RSolverStress::prepare()
                     RLogger::error("%s\n",rError.getMessage().toUtf8().constData());
                     abort = true;
                 }
-                #pragma omp flush (abort)
             }
         }
         if (abort)
@@ -575,12 +579,11 @@ void RSolverStress::prepare()
     {
         RVolume &volume = this->pModel->getVolume(i);
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(volume.size());j++)
         {
-            #pragma omp flush (abort)
-            if (abort)
+            if (abort.load(std::memory_order_relaxed))
             {
                 continue;
             }
@@ -693,10 +696,7 @@ void RSolverStress::prepare()
                         }
                     }
                 }
-                #pragma omp critical
-                {
-                    this->assemblyMatrix(elementID,Me,Ke,fe);
-                }
+                this->assemblyMatrix(elementID,Me,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())],Mp[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -705,7 +705,6 @@ void RSolverStress::prepare()
                     RLogger::error("%s\n",rError.getMessage().toUtf8().constData());
                     abort = true;
                 }
-                #pragma omp flush (abort)
             }
         }
         if (abort)
@@ -713,6 +712,19 @@ void RSolverStress::prepare()
             throw RError(RError::Type::Application,R_ERROR_REF,"Failed to prepare matrix system.");
         }
     }
+
+    // Merge per-thread assembly buffers.
+    #pragma omp parallel for default(shared)
+    for (int64_t i=0;i<int64_t(this->A.getNRows());i++)
+    {
+        for (int t=0;t<np;t++)
+        {
+            this->A.getVector(uint(i)).addVector(Ap[t].getVector(uint(i)));
+            this->M.getVector(uint(i)).addVector(Mp[t].getVector(uint(i)));
+            this->b[uint(i)] += bp[t][uint(i)];
+        }
+    }
+
     if (this->problemType == R_PROBLEM_STRESS_MODAL)
     {
         RLogger::info("Restoring prestressed nodes\n");
@@ -879,12 +891,11 @@ void RSolverStress::process()
             continue;
         }
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(line.size());j++)
         {
-            #pragma omp flush (abort)
-            if (abort)
+            if (abort.load(std::memory_order_relaxed))
             {
                 continue;
             }
@@ -1009,11 +1020,12 @@ void RSolverStress::process()
                         this->nodeForce.y[element.getNodeId(m)] += fe[3*m+1];
                         this->nodeForce.z[element.getNodeId(m)] += fe[3*m+2];
                     }
-
-                    this->elementNormalStress[elementID] = QeN;
-                    this->elementShearStress[elementID] = 0.0;
-                    this->elementVonMisses[elementID] = QeN;
                 }
+
+                // Writes below are per-element - no synchronization needed.
+                this->elementNormalStress[elementID] = QeN;
+                this->elementShearStress[elementID] = 0.0;
+                this->elementVonMisses[elementID] = QeN;
             }
             catch (const RError &rError)
             {
@@ -1022,7 +1034,6 @@ void RSolverStress::process()
                     RLogger::error("%s\n",rError.getMessage().toUtf8().constData());
                     abort = true;
                 }
-                #pragma omp flush (abort)
             }
         }
         if (abort)
@@ -1042,12 +1053,11 @@ void RSolverStress::process()
             continue;
         }
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(surface.size());j++)
         {
-            #pragma omp flush (abort)
-            if (abort)
+            if (abort.load(std::memory_order_relaxed))
             {
                 continue;
             }
@@ -1213,11 +1223,12 @@ void RSolverStress::process()
                         this->nodeForce.y[element.getNodeId(m)] += fe[3*m+1];
                         this->nodeForce.z[element.getNodeId(m)] += fe[3*m+2];
                     }
-
-                    this->elementNormalStress[elementID] = QeN;
-                    this->elementShearStress[elementID] = QeS;
-                    this->elementVonMisses[elementID] = QeVM;
                 }
+
+                // Writes below are per-element - no synchronization needed.
+                this->elementNormalStress[elementID] = QeN;
+                this->elementShearStress[elementID] = QeS;
+                this->elementVonMisses[elementID] = QeVM;
             }
             catch (const RError &rError)
             {
@@ -1226,7 +1237,6 @@ void RSolverStress::process()
                     RLogger::error("%s\n",rError.getMessage().toUtf8().constData());
                     abort = true;
                 }
-                #pragma omp flush (abort)
             }
         }
         if (abort)
@@ -1240,12 +1250,11 @@ void RSolverStress::process()
     {
         RVolume &volume = this->pModel->getVolume(i);
 
-        bool abort = false;
+        std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
         for (int64_t j=0;j<int64_t(volume.size());j++)
         {
-            #pragma omp flush (abort)
-            if (abort)
+            if (abort.load(std::memory_order_relaxed))
             {
                 continue;
             }
@@ -1391,11 +1400,12 @@ void RSolverStress::process()
                         this->nodeForce.y[element.getNodeId(m)] += fe[3*m+1];
                         this->nodeForce.z[element.getNodeId(m)] += fe[3*m+2];
                     }
-
-                    this->elementNormalStress[elementID] = QeN;
-                    this->elementShearStress[elementID] = QeS;
-                    this->elementVonMisses[elementID] = QeVM;
                 }
+
+                // Writes below are per-element - no synchronization needed.
+                this->elementNormalStress[elementID] = QeN;
+                this->elementShearStress[elementID] = QeS;
+                this->elementVonMisses[elementID] = QeVM;
             }
             catch (const RError &rError)
             {
@@ -1404,7 +1414,6 @@ void RSolverStress::process()
                     RLogger::error("%s\n",rError.getMessage().toUtf8().constData());
                     abort = true;
                 }
-                #pragma omp flush (abort)
             }
         }
         if (abort)
@@ -1651,7 +1660,7 @@ void RSolverStress::generateNodeBook()
     }
 }
 
-void RSolverStress::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRMatrix &Ke, const RRVector &fe)
+void RSolverStress::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRMatrix &Ke, const RRVector &fe, RSparseMatrix &Ap, RRVector &bp, RSparseMatrix &Mp)
 {
     double alpha = this->pModel->getTimeSolver().getTimeMarchApproximationCoefficient();
     double dt = this->pModel->getTimeSolver().getCurrentTimeStepSize();
@@ -1748,7 +1757,7 @@ void RSolverStress::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRM
 
             if (this->nodeBook.getValue(dims*rElement.getNodeId(m)+i,mp))
             {
-                this->b[mp] += be[dims*m+i];
+                bp[mp] += be[dims*m+i];
 
                 for (uint n=0;n<rElement.size();n++)
                 {
@@ -1758,10 +1767,10 @@ void RSolverStress::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRM
 
                         if (this->nodeBook.getValue(dims*rElement.getNodeId(n)+j,np))
                         {
-                            this->A.addValue(mp,np,Ae[dims*m+i][dims*n+j]);
+                            Ap.addValue(mp,np,Ae[dims*m+i][dims*n+j]);
                             if (this->problemType == R_PROBLEM_STRESS_MODAL)
                             {
-                                this->M.addValue(mp,np,Me[dims*m+i][dims*n+j]);
+                                Mp.addValue(mp,np,Me[dims*m+i][dims*n+j]);
                             }
                         }
                     }
