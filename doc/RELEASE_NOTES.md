@@ -1,8 +1,90 @@
-## Version 1.0.2
+## Version 1.1.0
 
 ### Improvements
 
 - Class **RFileManager** changed to namespace **RFileUtils**
+- **RSolverAcoustic, RSolverElectrostatics, RSolverHeat, RSolverMagnetostatics,
+  RSolverStress:** element assembly no longer runs inside an `omp critical`
+  section. Each thread assembles into its own `RSparseMatrix`/`RRVector`
+  (plus `M` for modal stress), and the buffers are merged into the global
+  system in a single parallel row-wise pass after the element loop. The
+  protected `assemblyMatrix()` methods now take the target matrix/vector as
+  parameters instead of writing to the solver members directly.
+- **RSolverFluid:** per-thread assembly buffers moved into members
+  (`threadAssemblyMatrices`, `threadAssemblyVectors`); the sparse pattern is
+  copied into them only when the pattern, mesh, or thread count changes, and
+  values are zeroed in place between iterations.
+- **RSolverAcoustic, RSolverElectrostatics, RSolverFluidHeat,
+  RSolverFluidParticle, RSolverHeat, RSolverMagnetostatics, RSolverStress:**
+  `bool` abort flags with `#pragma omp flush` replaced by `std::atomic<bool>`
+  with `memory_order_relaxed`, removing explicit memory barriers from the
+  element loops.
+- **RSolverRadiativeHeat::prepare():** matrix rows are pre-allocated with
+  `setNRows()`, so each outer iteration touches only its own row and the
+  `omp critical` section around `A.addValue()` is gone.
+- **RSolverStress::process():** per-element stress results are written outside
+  the `omp critical` section that accumulates node forces.
+- **RScales::convert():** the condition-component list is gathered once before
+  the parallel region instead of being rebuilt by every thread inside an
+  `omp critical` section.
+- **RSolverMesh::prepare():** maximum element volume uses an OpenMP
+  `reduction(max:)` clause instead of an `omp critical` section.
+- **RHemiCube::calculateViewFactors():** the eye-patch loop uses
+  `schedule(dynamic)`; emitter patches do far more work than non-emitters, so a
+  static split left threads idle.
+- **RMatrixSolver:** the sparse CSR cache is now guarded by a mutex and bounded
+  to 16 entries (entries are keyed by matrix address, so stale ones would
+  otherwise accumulate). `solveCG()`/`solveGMRES()` reuse the cache without
+  re-validating it, as `solve()` refreshes it immediately beforehand.
+- **RMatrixSolver::solveCG(), solveGMRES():** iterations now also stop when the
+  solution diverges, not only when it converges.
+- **RIterationInfo:** new `hasDiverged()` method reporting a non-finite error or
+  trend.
+- **RSolverAcoustic, RSolverElectrostatics, RSolverFluid, RSolverFluidHeat,
+  RSolverFluidParticle, RSolverHeat, RSolverMagnetostatics,
+  RSolverRadiativeHeat:** `catch (RError error) { ...; throw error; }` replaced
+  with `catch (const RError &) { ...; throw; }`, avoiding an exception copy and
+  preserving the original exception.
+- **RSolverFluid::statistics():** removed temporary `VALIDATION` norm logging.
+
+### Bug fixes
+
+- **RIterationInfo::hasConverged():** a non-finite (NaN/infinite) error or trend
+  was reported as *converged*, silently accepting a diverged solve. Non-finite
+  values now report divergence via `hasDiverged()`.
+- **RConvection::calculateNu():** the Churchill & Chu laminar branch for vertical
+  planes and cylinders tested `Ra <= 1.0e-9` instead of `Ra <= 1.0e9`, so
+  practically every case took the turbulent correlation.
+- **RConvection::calculateNu():** the horizontal-plates case dropped the
+  unreachable `0.27 * Ra^(1/4)` branch; that correlation needs plate-orientation
+  information which is not available here.
+- **REigenValueSolver::solve():** eigenvectors were reordered by pairwise swaps
+  (preceded by a spurious `d[0]`/`d[1]` swap), which did not reproduce the sort
+  permutation. Rows are now permuted through `indexes` into a copy, guarded by a
+  dimension check.
+- **REigenValueSolver::solveRayleigh():** the shifted system was solved with `M`
+  instead of the shifted matrix `M2`.
+- **REigenValueSolver::qlDecomposition():** convergence test `m >= l` relaxed the
+  exit condition and could terminate the sweep early; corrected to `m == l`.
+- **REigenValueSolver::qrDecomposition():** `RLogger::unindent()` was skipped on
+  the converged path, leaving log indentation unbalanced.
+- **RHemiCube::_init():** existing sectors were leaked when copying into an
+  already-populated hemicube; they are now deleted first. `operator=()` also
+  guards against self-assignment.
+- **RSolverHeat::prepare():** the `B` matrix was not zeroed between line elements,
+  so contributions accumulated across elements.
+- **RSolverHeat::prepare():** `htc`/`htt` were shared across the parallel surface
+  loop while `getNaturalConvection()` overwrites them per element — a data race.
+  Each iteration now takes its own copy of the surface values.
+- **RSolverGeneric::writeResults():** the time-step modulo was evaluated without
+  checking the output frequency, dividing by zero when it is 0.
+- **RSolverRadiativeHeat::process():** element/patch area ratio was computed
+  without checking for a zero patch area.
+- **RMatrixSolver::solveCG():** `ro1 = std::max(ro1,eps)` flipped the sign of a
+  negative `ro1`; the magnitude is now clamped while the sign is preserved.
+- **RSolverFluid::clearShapeDerivatives():** the pointer vector was not cleared
+  after deleting its contents, leaving dangling pointers. `prepare()` now clears
+  the cached derivatives before recomputing them when the mesh changed.
 
 ---
 
