@@ -1,3 +1,11 @@
+## Version 1.0.2
+
+### Improvements
+
+- Class **RFileManager** changed to namespace **RFileUtils**
+
+---
+
 ## Version 1.0.1
 
 ### Improvements

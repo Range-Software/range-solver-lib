@@ -4,7 +4,7 @@
 
 #include <rbl_application_state.h>
 
-#include <rml_file_manager.h>
+#include <rml_file_utils.h>
 
 #include "rsolvergeneric.h"
 
@@ -155,9 +155,9 @@ void RSolverGeneric::updateOldRecords(const RTimeSolver &rTimeSolver, const QStr
         // Update previous records.
         for (unsigned int i=0;i<=rTimeSolver.getCurrentTimeStep();i++)
         {
-            QString fileName = RFileManager::getFileNameWithTimeStep(modelFileName,i);
+            QString fileName = RFileUtils::getFileNameWithTimeStep(modelFileName,i);
 
-            if (RFileManager::fileExists(fileName))
+            if (RFileUtils::fileExists(fileName))
             {
                 RLogger::info("Updating model file \'%s\'\n",fileName.toUtf8().constData());
 
@@ -173,14 +173,14 @@ void RSolverGeneric::updateOldRecords(const RTimeSolver &rTimeSolver, const QStr
         // Delete records which will be computed again.
         for (unsigned int i=rTimeSolver.getCurrentTimeStep();i<rTimeSolver.getNTimeSteps();i++)
         {
-            QString fileName = RFileManager::getFileNameWithTimeStep(modelFileName,i+1);
+            QString fileName = RFileUtils::getFileNameWithTimeStep(modelFileName,i+1);
 
-            if (RFileManager::fileExists(fileName))
+            if (RFileUtils::fileExists(fileName))
             {
                 RLogger::info("Removing model file \'%s\'\n",fileName.toUtf8().constData());
                 try
                 {
-                    RFileManager::remove(fileName);
+                    RFileUtils::remove(fileName);
                 }
                 catch (RError &error)
                 {
