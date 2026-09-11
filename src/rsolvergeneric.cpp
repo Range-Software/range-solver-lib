@@ -96,6 +96,58 @@ void RSolverGeneric::run(bool firstExecution, uint taskIteration)
             }
         }
     }
+    else if (this->problemType == R_PROBLEM_ACOUSTICS &&
+             this->pModel->getProblemSetup().getAcousticSetup().getAnalysisType() == R_ACOUSTIC_ANALYSIS_HARMONIC)
+    {
+        // Frequency-domain acoustics - sweep the requested frequencies, each one
+        // producing its own result record (see RModel::write).
+        RAcousticSetup &acousticSetup = this->pModel->getProblemSetup().getAcousticSetup();
+
+        this->applyDisplacement();
+
+        if (firstExecution)
+        {
+            this->updateScales();
+        }
+
+        uint nFrequencies = std::max(acousticSetup.getNFrequencies(),uint(1));
+
+        for (uint i=0;i<nFrequencies;i++)
+        {
+            acousticSetup.setFrequencyIndex(i);
+
+            RLogger::info("Frequency: %9u of %-9u | f = % 12e [Hz]\n",
+                          i+1,
+                          nFrequencies,
+                          acousticSetup.getFrequency());
+            RLogger::indent();
+
+            this->scales.downscale(*this->pModel);
+
+            this->initialize();
+            this->recoverSharedData();
+            this->recover();
+            this->prepare();
+            this->solve();
+            this->process();
+            this->store();
+            this->storeSharedData();
+
+            this->scales.upscale(*this->pModel);
+
+            this->writeResults();
+            this->statistics();
+
+            RLogger::unindent();
+
+            if (RApplicationState::getInstance().getStateType() == R_APPLICATION_STATE_STOP)
+            {
+                break;
+            }
+        }
+
+        this->removeDisplacement();
+    }
     else
     {
         if (this->problemType != R_PROBLEM_STRESS && this->problemType != R_PROBLEM_STRESS_MODAL && this->problemType != R_PROBLEM_MESH)
@@ -282,6 +334,9 @@ void RSolverGeneric::updateLocalRotations()
     {
         const RSurface &rSurface = this->pModel->getSurface(i);
         bool findLocalDirections = false;
+        bool useExplicitDirection = false;
+        RR3Vector explicitDirection;
+
         for (unsigned int j=0;j<rSurface.getNBoundaryConditions();j++)
         {
             const RBoundaryCondition &bc = rSurface.getBoundaryCondition(j);
@@ -290,9 +345,19 @@ void RSolverGeneric::updateLocalRotations()
                 if (bc.getHasLocalDirection())
                 {
                     findLocalDirections = true;
+                    // An explicitly entered direction replaces the one which
+                    // would otherwise be averaged from the element normals.
+                    useExplicitDirection = bc.getExplicitLocalDirection();
+                    explicitDirection = bc.getLocalDirection();
                     break;
                 }
             }
+        }
+        if (useExplicitDirection && explicitDirection.length() < RConstants::eps)
+        {
+            throw RError(RError::Type::Application,R_ERROR_REF,
+                         "Local direction of surface entity \'%s\' has zero length.",
+                         rSurface.getName().toUtf8().constData());
         }
         for (unsigned int j=0;j<rSurface.size();j++)
         {
@@ -300,7 +365,11 @@ void RSolverGeneric::updateLocalRotations()
             {
                 const RElement &rElement = this->pModel->getElement(rSurface.get(j));
 
-                if (!rElement.findNormal(this->pModel->getNodes(),normal[0],normal[1],normal[2]))
+                if (useExplicitDirection)
+                {
+                    normal = explicitDirection;
+                }
+                else if (!rElement.findNormal(this->pModel->getNodes(),normal[0],normal[1],normal[2]))
                 {
                     throw RError(RError::Type::Application,R_ERROR_REF,"Could not calculate element normal for element# = %u.",rSurface.get(j));
                 }
@@ -373,6 +442,7 @@ void RSolverGeneric::updateLocalRotations()
     {
         RR3Vector direction;
         bool findLocalDirections = false;
+        bool useExplicitDirection = false;
         const RLine &rLine = this->pModel->getLine(i);
         for (unsigned int j=0;j<rLine.getNBoundaryConditions();j++)
         {
@@ -382,12 +452,38 @@ void RSolverGeneric::updateLocalRotations()
                 if (bc.getHasLocalDirection())
                 {
                     findLocalDirections = true;
+                    // An explicitly entered direction replaces the frame which
+                    // would otherwise follow the element direction.
+                    useExplicitDirection = bc.getExplicitLocalDirection();
+                    direction = bc.getLocalDirection();
                     break;
                 }
             }
         }
         if (findLocalDirections)
         {
+            if (useExplicitDirection)
+            {
+                RR3Vector localDirection(direction);
+                if (localDirection.normalize() == 0.0)
+                {
+                    throw RError(RError::Type::Application,R_ERROR_REF,
+                                 "Local direction of line entity \'%s\' has zero length.",
+                                 rLine.getName().toUtf8().constData());
+                }
+                localDirection.findRotationMatrix(R);
+
+                for (uint j=0;j<rLine.size();j++)
+                {
+                    const RElement &rElement = this->pModel->getElement(rLine.get(j));
+                    for (uint k=0;k<rElement.size();k++)
+                    {
+                        this->localRotations[rElement.getNodeId(k)].activate(R);
+                    }
+                }
+                continue;
+            }
+
             for (uint j=0;j<rLine.size();j++)
             {
                 const RElement &rElement = this->pModel->getElement(rLine.get(j));
@@ -437,8 +533,13 @@ void RSolverGeneric::writeResults()
         return;
     }
 
+    // A harmonic acoustic analysis writes one record per frequency and is not
+    // subject to the time solver output frequency.
+    bool harmonicAcoustics = (this->problemType == R_PROBLEM_ACOUSTICS) &&
+                             (this->pModel->getProblemSetup().getAcousticSetup().getAnalysisType() == R_ACOUSTIC_ANALYSIS_HARMONIC);
+
     bool canWrite = true;
-    if (this->pModel->getTimeSolver().getEnabled())
+    if (!harmonicAcoustics && this->pModel->getTimeSolver().getEnabled())
     {
         canWrite = false;
         uint outputFrequency = this->pModel->getTimeSolver().getOutputFrequency();
@@ -652,6 +753,10 @@ void RSolverGeneric::generateVariableVector(RVariableType variableType,
                     continue;
                 }
                 const RConditionComponent &conditionComponent = ec.getComponent(ecComponentPosition);
+                if (!conditionComponent.getEnabled())
+                {
+                    continue;
+                }
                 double value = conditionComponent.get(this->pModel->getTimeSolver().getCurrentTime());
 
                 for (unsigned int k=0;k<pElementGroup->size();k++)
@@ -674,6 +779,10 @@ void RSolverGeneric::generateVariableVector(RVariableType variableType,
                     continue;
                 }
                 const RConditionComponent &conditionComponent = ic.getComponent(icComponentPosition);
+                if (!conditionComponent.getEnabled())
+                {
+                    continue;
+                }
                 double value = conditionComponent.get(this->pModel->getTimeSolver().getCurrentTime());
 
                 for (unsigned int k=0;k<pElementGroup->size();k++)
@@ -700,6 +809,12 @@ void RSolverGeneric::generateVariableVector(RVariableType variableType,
                     continue;
                 }
                 const RConditionComponent &conditionComponent = bc.getComponent(bcComponentPosition);
+                // A component of an optional condition can be switched off - it
+                // then prescribes nothing at all.
+                if (!conditionComponent.getEnabled())
+                {
+                    continue;
+                }
                 double value = conditionComponent.get(this->pModel->getTimeSolver().getCurrentTime());
 
                 for (unsigned int k=0;k<pElementGroup->size();k++)

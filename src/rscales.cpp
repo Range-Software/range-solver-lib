@@ -53,10 +53,21 @@ double RScales::findScaleFactor(RVariableType variableType) const
         case R_VARIABLE_ACCELERATION_Y:
         case R_VARIABLE_ACCELERATION_Z:
             return this->metre/std::pow(this->second,2);
+        case R_VARIABLE_ACOUSTIC_ABSORPTION_COEFFICIENT:
+        case R_VARIABLE_ACOUSTIC_PHASE:
+        // Sound pressure level is logarithmic and must never be scaled.
+        case R_VARIABLE_ACOUSTIC_SOUND_PRESSURE_LEVEL:
+            return 1.0;
+        case R_VARIABLE_ACOUSTIC_DAMPING_FACTOR:
+            return 1.0/this->second;
+        case R_VARIABLE_ACOUSTIC_IMPEDANCE:
+            return this->kilogram/(std::pow(this->metre,2)*this->second);
+        case R_VARIABLE_ACOUSTIC_INTENSITY:
+            return this->kilogram/std::pow(this->second,3);
         case R_VARIABLE_ACOUSTIC_PRESSURE:
             return this->kilogram/(this->metre*std::pow(this->second,2));
         case R_VARIABLE_ACOUSTIC_PARTICLE_VELOCITY:
-            return this->metre*this->second;
+            return this->metre/this->second;
         case R_VARIABLE_CHARGE_DENSITY:
             return this->ampere*this->second;
         case R_VARIABLE_CONVECTION_COEFFICIENT:
@@ -151,12 +162,14 @@ double RScales::findScaleFactor(RVariableType variableType) const
             return std::pow(this->second*this->ampere,2);
         case R_VARIABLE_POISSON_RATIO:
             return 1.0;
+        // Velocity potential carries units of m^2/s.
         case R_VARIABLE_POTENTIAL:
-            return 1.0;
+        case R_VARIABLE_POTENTIAL_IMAGINARY:
+            return std::pow(this->metre,2)/this->second;
         case R_VARIABLE_POTENTIAL_VELOCITY:
-            return 1.0/this->second;
+            return std::pow(this->metre,2)/std::pow(this->second,2);
         case R_VARIABLE_POTENTIAL_ACCELERATION:
-            return 1.0/std::pow(this->second,2);
+            return std::pow(this->metre,2)/std::pow(this->second,3);
         case R_VARIABLE_PRESSURE:
         case R_VARIABLE_MODULUS_OF_ELASTICITY:
         case R_VARIABLE_STRESS:

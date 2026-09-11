@@ -20,16 +20,26 @@ class RSolverStress : public RSolverGeneric
         RRVector elementThermalExpansion;
         //! Element environment temperature vector.
         RRVector elementEnvironmentTemperature;
+        //! Number of constrained directions of each node, 0 to 3. They are the
+        //! first directions of the node local frame held in localRotations.
+        RUVector nodeConstrainedDirections;
+        //! Prescribed displacement of each node, expressed in the frame of that
+        //! node - the local frame where one is active, global otherwise. Only
+        //! the first nodeConstrainedDirections components carry a meaning.
+        RRMatrix nodePrescribedDisplacement;
         //! Node displacement vector.
         RSolverCartesianVector<RRVector> nodeDisplacement;
         //! Node initial displacement vector.
         RSolverCartesianVector<RRVector> nodeInitialDisplacement;
         //! Node force vector.
         RSolverCartesianVector<RRVector> nodeForce;
-        //! Node acceleration vector.
-        RSolverCartesianVector<RRVector> nodeAcceleration;
         //! Node pressure.
         RRVector nodePressure;
+        //! Element stress components.
+        //! Volume elements store them in global coordinates, surface and line
+        //! elements in their own local element frame.
+        //! Order: xx, yy, zz, yz, xz, xy.
+        RRVector elementStress[6];
         //! Element normal stress.
         RRVector elementNormalStress;
         //! Element shear stress.
@@ -88,8 +98,25 @@ class RSolverStress : public RSolverGeneric
         //! Process statistics.
         void statistics() override;
 
+        //! Local rotations are built from the constraints themselves, see
+        //! generateLocalConstraints(), so the generic geometric pass is not used.
+        void updateLocalRotations() override;
+
+        //! Collect every displacement constraint acting on each node, reduce
+        //! them to an orthonormal set, and from that build the node local frame,
+        //! the number of constrained directions and the prescribed values.
+        void generateLocalConstraints();
+
         //! Generate node book.
         void generateNodeBook();
+
+        //! Return true if given component of the boundary condition is present
+        //! and switched on.
+        static bool isComponentEnabled(const RBoundaryCondition &bc, RVariableType variableType);
+
+        //! Return the value of given component of the boundary condition at the
+        //! current solver time, or zero when the component is absent.
+        double findComponentValue(const RBoundaryCondition &bc, RVariableType variableType) const;
 
         //! Assembly matrix
         void assemblyMatrix(unsigned int elementID, const RRMatrix &Me, const RRMatrix &Ke, const RRVector &fe, RSparseMatrix &Ap, RRVector &bp, RSparseMatrix &Mp);

@@ -1,4 +1,5 @@
 #include <cmath>
+#include <limits>
 
 #include "reigenvaluesolver.h"
 
@@ -54,29 +55,29 @@ void REigenValueSolver::solve(const RSparseMatrix &M, const RSparseMatrix &K, RR
             }
             break;
         }
-        case REigenValueSolverConf::Arnoldi:
+        case REigenValueSolverConf::SubspaceIteration:
         {
-            // Find multiple eigen values.
+            // Find several of the lowest eigen values.
             try
             {
-                this->solveArnoldi(M,K,d,ev);
+                this->solveSubspaceIteration(M,K,d,ev);
             }
             catch (const RError &error)
             {
-                throw RError(RError::Type::Application,R_ERROR_REF,"Arnoldi method failed. %s",error.getMessage().toUtf8().constData());
+                throw RError(RError::Type::Application,R_ERROR_REF,"Subspace iteration failed. %s",error.getMessage().toUtf8().constData());
             }
             break;
         }
-        case REigenValueSolverConf::Rayleigh:
+        case REigenValueSolverConf::InversePowerIteration:
         {
-            // Find one (most dominant) eigen value.
+            // Find the single lowest eigen value.
             try
             {
-                this->solveRayleigh(M,K,d,ev);
+                this->solveInversePowerIteration(M,K,d,ev);
             }
             catch (const RError &error)
             {
-                throw RError(RError::Type::Application,R_ERROR_REF,"Rayleigh method failed. %s",error.getMessage().toUtf8().constData());
+                throw RError(RError::Type::Application,R_ERROR_REF,"Inverse power iteration failed. %s",error.getMessage().toUtf8().constData());
             }
             break;
         }
@@ -86,14 +87,13 @@ void REigenValueSolver::solve(const RSparseMatrix &M, const RSparseMatrix &K, RR
         }
     }
 
-    if (d.getNRows() > 1)
+    // Every method returns lambda of K * phi = lambda * M * phi directly. Sort
+    // the values ascending so that d[0] is always the lowest one, and carry the
+    // eigen vectors along.
+    try
     {
-        try
+        if (d.getNRows() > 1)
         {
-            for (uint i=0;i<d.getNRows();i++)
-            {
-                d[i] = std::fabs(1.0/d[i]);
-            }
             std::vector<uint> indexes;
             RUtil::qSort(d,indexes);
 
@@ -110,10 +110,10 @@ void REigenValueSolver::solve(const RSparseMatrix &M, const RSparseMatrix &K, RR
                 }
             }
         }
-        catch (const RError &error)
-        {
-            throw RError(RError::Type::Application,R_ERROR_REF,"Failed to reorder eigen values and vectors. %s",error.getMessage().toUtf8().constData());
-        }
+    }
+    catch (const RError &error)
+    {
+        throw RError(RError::Type::Application,R_ERROR_REF,"Failed to reorder eigen values and vectors. %s",error.getMessage().toUtf8().constData());
     }
 }
 
@@ -207,216 +207,540 @@ void REigenValueSolver::solveLanczos(const RSparseMatrix &M, const RSparseMatrix
     {
         throw RError(RError::Type::Application,R_ERROR_REF,"QL decomposition failed. %s",error.getMessage().toUtf8().constData());
     }
+
+    // The iteration runs on K^-1 * M, so its values are the reciprocals of the
+    // eigen values of K * phi = lambda * M * phi. A value which stayed at zero
+    // was not resolved and stands for an infinite eigen value.
+    for (uint i=0;i<d.getNRows();i++)
+    {
+        double value = std::fabs(d[i]);
+        d[i] = (value < RConstants::eps)
+             ? std::numeric_limits<double>::infinity()
+             : 1.0/value;
+    }
 }
 
-void REigenValueSolver::solveArnoldi(const RSparseMatrix &M, const RSparseMatrix &K, RRVector &d, RRMatrix &ev)
+
+void REigenValueSolver::solveSubspaceIteration(const RSparseMatrix &M, const RSparseMatrix &K, RRVector &d, RRMatrix &ev)
 {
-    uint ne = std::min(this->eigenValueSolverConf.getNEigenValues(),K.getNRows());
-    uint n = M.getNRows();
+    uint n = K.getNRows();
+    uint nEigen = std::min(this->eigenValueSolverConf.getNEigenValues(),n);
 
-    RRMatrix H(ne,ne,0.0);
-    RRMatrix Qa(n,ne,0.0);
-    RRMatrix Qq;
-    RRVector q(n), qo(n);
-
-    // generate random normalized vector
-    for (uint i=0;i<n;i++)
+    if (nEigen == 0)
     {
-        q[i] = double(rand()) / double(RAND_MAX);
+        d.resize(0);
+        ev.resize(0,0);
+        return;
     }
-    R_ERROR_ASSERT(q.normalize() != 0.0);
-    for (uint i=0;i<n;i++)
+
+    // A few extra vectors make the wanted eigen pairs converge markedly faster.
+    uint m = std::min(n,std::max(nEigen+4,2*nEigen));
+
+    RRMatrix X(n,m,0.0);
+    RRMatrix Y(n,m,0.0);
+
+    // Start from a set of unit vectors spread over the system plus a random
+    // perturbation, so that the block is never accidentally deficient and the
+    // result does not depend on the random sequence alone.
+    for (uint j=0;j<m;j++)
     {
-        Qa[i][0] = q[i];
+        for (uint i=0;i<n;i++)
+        {
+            X[i][j] = 1.0e-3 * (double(std::rand()) / double(RAND_MAX) - 0.5);
+        }
+        X[(j*n)/m][j] += 1.0;
     }
 
     RMatrixSolver solver(this->matrixSolverConf);
 
-    // Arnoldi iteration
-    for (uint i=1;i<ne+1;i++)
+    RRVector theta(m,0.0);
+    RRVector thetaOld(m,0.0);
+
+    uint nIterations = std::max(this->eigenValueSolverConf.getNIterations(),uint(1));
+    double convergenceValue = this->eigenValueSolverConf.getSolverCvgValue();
+
+    RRVector x(n,0.0);
+    RRVector y(n,0.0);
+    RRVector b(n,0.0);
+
+    for (uint it=0;it<nIterations;it++)
     {
-        RLogger::info("Arnoldi iteration %u of %u\n",i,ne);
+        RLogger::info("Subspace iteration %u of %u\n",it+1,nIterations);
         RLogger::indent();
 
-        for (uint j=0;j<n;j++)
+        // Y = K^-1 * M * X, one column at a time.
+        for (uint j=0;j<m;j++)
         {
-            qo[j] = Qa[j][i-1];
+            for (uint i=0;i<n;i++)
+            {
+                x[i] = X[i][j];
+                y[i] = 0.0;
+            }
+            RSparseMatrix::mlt(M,x,b);
+            try
+            {
+                solver.solve(K,b,y,R_MATRIX_PRECONDITIONER_JACOBI);
+            }
+            catch (const RError &error)
+            {
+                RLogger::unindent();
+                throw RError(RError::Type::Application,R_ERROR_REF,"Failed to solve matrix system. %s",error.getMessage().toUtf8().constData());
+            }
+            for (uint i=0;i<n;i++)
+            {
+                Y[i][j] = y[i];
+            }
         }
 
-        // K*q = M*qo
-        RRVector f;
-        RSparseMatrix::mlt(M,qo,f);
+        uint mKept = REigenValueSolver::orthonormalizeColumns(Y);
+        if (mKept == 0)
+        {
+            RLogger::unindent();
+            throw RError(RError::Type::Application,R_ERROR_REF,"Subspace collapsed - no independent direction is left.");
+        }
+
+        // Rayleigh-Ritz projection onto the subspace spanned by Y.
+        RRMatrix Kr(mKept,mKept,0.0);
+        RRMatrix Mr(mKept,mKept,0.0);
+
+        for (uint j=0;j<mKept;j++)
+        {
+            for (uint i=0;i<n;i++)
+            {
+                x[i] = Y[i][j];
+            }
+
+            RRVector kx,mx;
+            RSparseMatrix::mlt(K,x,kx);
+            RSparseMatrix::mlt(M,x,mx);
+
+            for (uint l=0;l<mKept;l++)
+            {
+                double kSum = 0.0;
+                double mSum = 0.0;
+                for (uint i=0;i<n;i++)
+                {
+                    kSum += Y[i][l] * kx[i];
+                    mSum += Y[i][l] * mx[i];
+                }
+                Kr[l][j] = kSum;
+                Mr[l][j] = mSum;
+            }
+        }
+
+        // Reduce K_r*z = theta*M_r*z to a standard symmetric problem using a
+        // Cholesky decomposition of M_r.
+        RRMatrix L;
+        if (!REigenValueSolver::choleskyDecomposition(Mr,L))
+        {
+            RLogger::unindent();
+            throw RError(RError::Type::Application,R_ERROR_REF,
+                         "Projected mass matrix is not positive definite - check that every computable entity has a density.");
+        }
+
+        RRMatrix G(mKept,mKept,0.0);
+        RRVector column(mKept,0.0);
+        RRVector solution(mKept,0.0);
+
+        // G = L^-1 * K_r
+        for (uint j=0;j<mKept;j++)
+        {
+            for (uint i=0;i<mKept;i++)
+            {
+                column[i] = Kr[i][j];
+            }
+            REigenValueSolver::forwardSubstitution(L,column,solution);
+            for (uint i=0;i<mKept;i++)
+            {
+                G[i][j] = solution[i];
+            }
+        }
+
+        // A = L^-1 * G^T, symmetric.
+        RRMatrix A(mKept,mKept,0.0);
+        for (uint j=0;j<mKept;j++)
+        {
+            for (uint i=0;i<mKept;i++)
+            {
+                column[i] = G[j][i];
+            }
+            REigenValueSolver::forwardSubstitution(L,column,solution);
+            for (uint i=0;i<mKept;i++)
+            {
+                A[i][j] = solution[i];
+            }
+        }
+
+        RRVector thetaRitz;
+        RRMatrix Z;
+        REigenValueSolver::jacobiEigen(A,thetaRitz,Z);
+
+        // Order the Ritz pairs by ascending eigen value.
+        std::vector<uint> order(mKept);
+        for (uint i=0;i<mKept;i++)
+        {
+            order[i] = i;
+        }
+        std::sort(order.begin(),order.end(),[&thetaRitz](uint a, uint b) { return thetaRitz[a] < thetaRitz[b]; });
+
+        // Back transform the Ritz vectors and rebuild the subspace.
+        X.resize(n,mKept,0.0);
+        for (uint j=0;j<mKept;j++)
+        {
+            for (uint i=0;i<mKept;i++)
+            {
+                column[i] = Z[i][order[j]];
+            }
+            REigenValueSolver::backwardSubstitution(L,column,solution);
+
+            for (uint i=0;i<n;i++)
+            {
+                double sum = 0.0;
+                for (uint l=0;l<mKept;l++)
+                {
+                    sum += Y[i][l] * solution[l];
+                }
+                X[i][j] = sum;
+            }
+        }
+
+        theta.resize(mKept,0.0);
+        for (uint j=0;j<mKept;j++)
+        {
+            theta[j] = thetaRitz[order[j]];
+        }
+        m = mKept;
+        Y.resize(n,mKept,0.0);
+
+        // Converged when the wanted eigen values stop moving.
+        bool converged = (it > 0);
+        uint nWanted = std::min(nEigen,mKept);
+        double maxChange = 0.0;
+        for (uint j=0;j<nWanted && converged;j++)
+        {
+            double scale = std::max(std::fabs(theta[j]),RConstants::eps);
+            double change = std::fabs(theta[j]-thetaOld[j]) / scale;
+            maxChange = std::max(maxChange,change);
+            if (change > convergenceValue)
+            {
+                converged = false;
+            }
+        }
+        if (it > 0)
+        {
+            RLogger::info("Convergence rate = %g\n",maxChange);
+        }
+
+        thetaOld = theta;
+
+        RLogger::unindent();
+
+        if (converged)
+        {
+            break;
+        }
+    }
+
+    uint nFound = std::min(nEigen,uint(theta.size()));
+    d.resize(nFound,0.0);
+    ev.resize(nFound,n,0.0);
+
+    for (uint j=0;j<nFound;j++)
+    {
+        d[j] = theta[j];
+        for (uint i=0;i<n;i++)
+        {
+            ev[j][i] = X[i][j];
+        }
+    }
+}
+
+
+void REigenValueSolver::solveInversePowerIteration(const RSparseMatrix &M, const RSparseMatrix &K, RRVector &d, RRMatrix &ev)
+{
+    uint n = K.getNRows();
+
+    RRVector x(n,0.0);
+    for (uint i=0;i<n;i++)
+    {
+        x[i] = double(std::rand()) / double(RAND_MAX) - 0.5;
+    }
+    if (x.normalize() == 0.0)
+    {
+        throw RError(RError::Type::Application,R_ERROR_REF,"Failed to generate a start vector.");
+    }
+
+    RMatrixSolver solver(this->matrixSolverConf);
+
+    uint nIterations = std::max(this->eigenValueSolverConf.getNIterations(),uint(1));
+    double convergenceValue = this->eigenValueSolverConf.getSolverCvgValue();
+
+    double lambda = 0.0;
+    RRVector b(n,0.0);
+    RRVector y(n,0.0);
+
+    for (uint it=0;it<nIterations;it++)
+    {
+        RLogger::info("Inverse power iteration %u of %u\n",it+1,nIterations);
+        RLogger::indent();
+
+        // Solving K*y = M*x drives x towards the eigen vector of the lowest
+        // eigen value, which is the dominant one of K^-1 * M.
+        RSparseMatrix::mlt(M,x,b);
+        y.fill(0.0);
         try
         {
-            solver.solve(K,f,q,R_MATRIX_PRECONDITIONER_JACOBI);
+            solver.solve(K,b,y,R_MATRIX_PRECONDITIONER_JACOBI);
         }
         catch (const RError &error)
         {
             RLogger::unindent();
-            throw RError(RError::Type::Application,R_ERROR_REF,"Failed to solve matrix system. %s", error.getMessage().toUtf8().constData());
+            throw RError(RError::Type::Application,R_ERROR_REF,"Failed to solve matrix system. %s",error.getMessage().toUtf8().constData());
         }
 
+        if (y.normalize() == 0.0)
+        {
+            RLogger::unindent();
+            throw RError(RError::Type::Application,R_ERROR_REF,"Inverse power iteration collapsed to a zero vector.");
+        }
+        x = y;
+
+        RRVector kx,mx;
+        RSparseMatrix::mlt(K,x,kx);
+        RSparseMatrix::mlt(M,x,mx);
+
+        double numerator = RRVector::dot(x,kx);
+        double denominator = RRVector::dot(x,mx);
+
+        if (std::fabs(denominator) < RConstants::eps)
+        {
+            RLogger::unindent();
+            throw RError(RError::Type::Application,R_ERROR_REF,
+                         "Projected mass is zero - check that every computable entity has a density.");
+        }
+
+        double lambdaNew = numerator / denominator;
+        double change = std::fabs(lambdaNew-lambda) / std::max(std::fabs(lambdaNew),RConstants::eps);
+
+        RLogger::info("Eigen value = %g, convergence rate = %g\n",lambdaNew,change);
+        RLogger::unindent();
+
+        lambda = lambdaNew;
+
+        if (it > 0 && change < convergenceValue)
+        {
+            break;
+        }
+    }
+
+    d.resize(1,0.0);
+    d[0] = lambda;
+
+    ev.resize(1,n,0.0);
+    for (uint i=0;i<n;i++)
+    {
+        ev[0][i] = x[i];
+    }
+}
+
+
+uint REigenValueSolver::orthonormalizeColumns(RRMatrix &X)
+{
+    uint n = X.getNRows();
+    uint m = X.getNColumns();
+    uint kept = 0;
+
+    for (uint j=0;j<m;j++)
+    {
+        // Modified Gram-Schmidt against the columns already kept.
+        for (uint l=0;l<kept;l++)
+        {
+            double dot = 0.0;
+            for (uint i=0;i<n;i++)
+            {
+                dot += X[i][l] * X[i][j];
+            }
+            for (uint i=0;i<n;i++)
+            {
+                X[i][j] -= dot * X[i][l];
+            }
+        }
+
+        double norm = 0.0;
+        for (uint i=0;i<n;i++)
+        {
+            norm += X[i][j] * X[i][j];
+        }
+        norm = std::sqrt(norm);
+
+        if (norm < RConstants::eps)
+        {
+            // Dependent direction - drop it.
+            continue;
+        }
+
+        for (uint i=0;i<n;i++)
+        {
+            X[i][kept] = X[i][j] / norm;
+        }
+        kept++;
+    }
+
+    return kept;
+}
+
+
+bool REigenValueSolver::choleskyDecomposition(const RRMatrix &A, RRMatrix &L)
+{
+    uint n = A.getNRows();
+
+    L.resize(n,n,0.0);
+    L.fill(0.0);
+
+    for (uint i=0;i<n;i++)
+    {
+        for (uint j=0;j<=i;j++)
+        {
+            double sum = A[i][j];
+            for (uint k=0;k<j;k++)
+            {
+                sum -= L[i][k] * L[j][k];
+            }
+
+            if (i == j)
+            {
+                if (sum <= 0.0)
+                {
+                    return false;
+                }
+                L[i][i] = std::sqrt(sum);
+            }
+            else
+            {
+                L[i][j] = sum / L[j][j];
+            }
+        }
+    }
+
+    return true;
+}
+
+
+void REigenValueSolver::forwardSubstitution(const RRMatrix &L, const RRVector &b, RRVector &x)
+{
+    uint n = L.getNRows();
+
+    x.resize(n,0.0);
+
+    for (uint i=0;i<n;i++)
+    {
+        double sum = b[i];
         for (uint j=0;j<i;j++)
         {
-            for (uint k=0;k<n;k++)
-            {
-                qo[k] = Qa[k][j];
-            }
-            H[j][i-1] = RRVector::dot(qo,q);
-            for (uint k=0;k<n;k++)
-            {
-                q[k] -= H[j][i-1] * qo[k];
-            }
+            sum -= L[i][j] * x[j];
         }
-        if (i < ne)
-        {
-            H[i][i-1] = RRVector::euclideanNorm(q);
-            R_ASSERT(H[i][i-1] != 0.0);
-            for (uint j=0;j<n;j++)
-            {
-                Qa[j][i] = q[j] / H[i][i-1];
-            }
-        }
-        RLogger::unindent();
+        x[i] = sum / L[i][i];
     }
-
-    try
-    {
-        REigenValueSolver::qrDecomposition(H,this->eigenValueSolverConf.getNIterations(),this->eigenValueSolverConf.getSolverCvgValue(),d,Qq);
-    }
-    catch (const RError &error)
-    {
-        throw RError(RError::Type::Application,R_ERROR_REF,"QR decomposition failed. %s",error.getMessage().toUtf8().constData());
-    }
-
-    RRMatrix::mlt(Qa,Qq,ev);
-    ev.transpose();
 }
 
-void REigenValueSolver::solveRayleigh(const RSparseMatrix &M, const RSparseMatrix &K, RRVector &e, RRMatrix &ev)
+
+void REigenValueSolver::backwardSubstitution(const RRMatrix &L, const RRVector &b, RRVector &x)
 {
-    RSparseMatrix M2(M);
-    uint n = M2.getNRows();
+    uint n = L.getNRows();
 
-    e.resize(1,0.0);
-    ev.resize(1,n,0.0);
+    x.resize(n,0.0);
 
-    RRVector b(n);
-    RRVector f(n);
-    RRVector c(n);
-    RRVector d(n);
-
-    for (uint i=0;i<n;i++)
+    for (uint i=n;i>0;i--)
     {
-        b[i] = double(rand()) / double(RAND_MAX);
-    }
-    b.normalize();
-
-    double mu = 1.0e9 * double(rand()) / double(RAND_MAX);
-    uint nIterations = this->eigenValueSolverConf.getNIterations();
-
-    std::vector< std::vector<uint> > mIndexes;
-    mIndexes.resize(n);
-    for (uint i=0;i<n;i++)
-    {
-        mIndexes[i] = M2.getRowIndexes(i);
-    }
-
-    std::vector< std::vector<uint> > kIndexes;
-    kIndexes.resize(n);
-    for (uint i=0;i<n;i++)
-    {
-        kIndexes[i] = K.getRowIndexes(i);
-    }
-
-    RMatrixSolver solver(this->matrixSolverConf);
-
-    for (uint it=0;it<nIterations;it++)
-    {
-        RLogger::info("Rayleigh quotient iteration %u of %u\n",it+1,nIterations);
-        RLogger::indent();
-
-        double muo = mu;
-
-        // Add K*mu to M
-        for (uint i=0;i<n;i++)
+        uint row = i-1;
+        double sum = b[row];
+        for (uint j=row+1;j<n;j++)
         {
-            f[i] = 0.0;
-            for (uint j=0;j<kIndexes[i].size();j++)
-            {
-                double value = K.getValue(i,j) * mu;
-                if (value != 0.0)
-                {
-                    M2.addValue(i,kIndexes[i][j],value);
-                }
-                // K*bi
-                f[i] += value * b[kIndexes[i][j]];
-            }
+            sum -= L[j][row] * x[j];
         }
-
-        // (M + K*ui)*ci = K*bi
-        solver.solve(M2,f,c,R_MATRIX_PRECONDITIONER_JACOBI);
-
-        // K*bi/||ci||
-        double norm = RRVector::euclideanNorm(c);
-        R_ASSERT(norm != 0.0);
-        f *= 1.0 / norm;
-
-        // (M + K*ui)*b(i+1) = K*bi/||ci||
-        solver.solve(M2,f,b,R_MATRIX_PRECONDITIONER_JACOBI);
-
-        // Remove K*mu from M
-        for (uint i=0;i<n;i++)
-        {
-            for (uint j=0;j<kIndexes[i].size();j++)
-            {
-                double value = -1.0 * K.getValue(i,j) * mu;
-                if (value != 0.0)
-                {
-                    M2.addValue(i,kIndexes[i][j],value);
-                }
-            }
-        }
-
-        // M*bi
-        for (uint i=0;i<n;i++)
-        {
-            f[i] = 0.0;
-            for (uint j=0;j<mIndexes[i].size();j++)
-            {
-                double value = M2.getValue(i,j);
-                f[i] += value * b[mIndexes[i][j]];
-            }
-        }
-
-        // K*di = M*bi
-        solver.solve(K,f,d,R_MATRIX_PRECONDITIONER_JACOBI);
-
-        // mui = bi dot di / ( bi * bi)
-        double bDot = RRVector::dot(b,b);
-        R_ASSERT(bDot != 0.0);
-        mu = RRVector::dot(d,b) / bDot;
-
-        double cvgVal = std::fabs(muo - mu);
-        RLogger::info("Convergence rate = %g", cvgVal);
-
-        RLogger::unindent();
-
-        if (it > 0)
-        {
-            if (cvgVal < this->eigenValueSolverConf.getSolverCvgValue())
-            {
-                break;
-            }
-        }
-    }
-
-    e[0] = mu;
-    for (uint i=0;i<n;i++)
-    {
-        ev[0][i] = b[i];
+        x[row] = sum / L[row][row];
     }
 }
+
+
+void REigenValueSolver::jacobiEigen(RRMatrix &A, RRVector &d, RRMatrix &V)
+{
+    uint n = A.getNRows();
+
+    V.resize(n,n,0.0);
+    V.setIdentity(n);
+    d.resize(n,0.0);
+
+    double scale = 0.0;
+    for (uint i=0;i<n;i++)
+    {
+        for (uint j=0;j<n;j++)
+        {
+            scale += A[i][j] * A[i][j];
+        }
+    }
+    double threshold = std::max(scale,1.0) * 1.0e-30;
+
+    for (uint sweep=0;sweep<100;sweep++)
+    {
+        double off = 0.0;
+        for (uint p=0;p<n;p++)
+        {
+            for (uint q=p+1;q<n;q++)
+            {
+                off += A[p][q] * A[p][q];
+            }
+        }
+        if (off <= threshold)
+        {
+            break;
+        }
+
+        for (uint p=0;p<n;p++)
+        {
+            for (uint q=p+1;q<n;q++)
+            {
+                if (std::fabs(A[p][q]) <= 0.0)
+                {
+                    continue;
+                }
+
+                double theta = (A[q][q] - A[p][p]) / (2.0 * A[p][q]);
+                double t = ((theta >= 0.0) ? 1.0 : -1.0) / (std::fabs(theta) + std::sqrt(theta*theta + 1.0));
+                double c = 1.0 / std::sqrt(t*t + 1.0);
+                double s = t * c;
+
+                for (uint k=0;k<n;k++)
+                {
+                    double akp = A[k][p];
+                    double akq = A[k][q];
+                    A[k][p] = c*akp - s*akq;
+                    A[k][q] = s*akp + c*akq;
+                }
+                for (uint k=0;k<n;k++)
+                {
+                    double apk = A[p][k];
+                    double aqk = A[q][k];
+                    A[p][k] = c*apk - s*aqk;
+                    A[q][k] = s*apk + c*aqk;
+                }
+                for (uint k=0;k<n;k++)
+                {
+                    double vkp = V[k][p];
+                    double vkq = V[k][q];
+                    V[k][p] = c*vkp - s*vkq;
+                    V[k][q] = s*vkp + c*vkq;
+                }
+            }
+        }
+    }
+
+    for (uint i=0;i<n;i++)
+    {
+        d[i] = A[i][i];
+    }
+}
+
 
 void REigenValueSolver::qlDecomposition(RRVector &d, RRVector &e)
 {
@@ -497,97 +821,3 @@ void REigenValueSolver::qlDecomposition(RRVector &d, RRVector &e)
     }
 }
 
-void REigenValueSolver::qrDecomposition(const RRMatrix &H, uint nIterations, double convergenceValue, RRVector &d, RRMatrix &V)
-{
-    uint n = H.getNRows();
-
-    d.resize(n);
-    V.resize(n,n,0.0);
-
-    RRVector a(n);
-    RRVector e(n);
-    RRMatrix A(H);
-    RRMatrix Q(n,n,0.0);
-    RRMatrix R(n,n,0.0);
-
-    for (uint it=0;it<nIterations;it++)
-    {
-        RLogger::info("QR / Gram-Schmidt %u of %u\n",it+1,nIterations);
-        RLogger::indent();
-
-        for (uint i=0;i<n;i++)
-        {
-            for (uint j=0;j<n;j++)
-            {
-                a[j] = A[j][i];
-            }
-            RRVector u(a);
-            for (uint j=0;j<i;j++)
-            {
-                for (uint k=0;k<n;k++)
-                {
-                    e[k] = Q[k][j];
-                }
-                double dot = RRVector::dot(a,e);
-                for (uint k=0;k<n;k++)
-                {
-                    u[k] -= dot * e[k];
-                }
-            }
-            double norm = RRVector::euclideanNorm(u);
-            R_ASSERT(norm != 0.0);
-            e = u;
-            e *= 1.0 / norm;
-            for (uint j=0;j<n;j++)
-            {
-                Q[j][i] = e[j];
-            }
-        }
-        for (uint i=0;i<n;i++)
-        {
-            for (uint j=0;j<n;j++)
-            {
-                e[j] = Q[j][i];
-            }
-            for (uint j=i;j<n;j++)
-            {
-                for (uint k=0;k<n;k++)
-                {
-                    a[k] = A[k][j];
-                }
-                R[i][j] = RRVector::dot(a,e);
-            }
-        }
-
-        RRMatrix::mlt(R,Q,A);
-
-        if (it == 0)
-        {
-            V = Q;
-        }
-        else
-        {
-            RRMatrix Vo(V);
-            RRMatrix::mlt(Vo,Q,V);
-        }
-
-        bool converged = true;
-
-        for (uint i=1;i<n;i++)
-        {
-            if (std::fabs(A[i][i-1]) > convergenceValue)
-            {
-                converged = false;
-            }
-        }
-        RLogger::unindent();
-        if (converged)
-        {
-            break;
-        }
-    }
-    for (uint i=0;i<n;i++)
-    {
-        d[i] = A[i][i];
-    }
-}

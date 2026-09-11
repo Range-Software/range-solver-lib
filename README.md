@@ -14,7 +14,7 @@ Each physics solver derives from `RSolverGeneric` and operates on an `RModel` fr
 | `RSolverFluidHeat` | Coupled fluid flow and heat transfer |
 | `RSolverFluidParticle` | Particle transport in fluid |
 | `RSolverStress` | Linear structural stress analysis |
-| `RSolverAcoustic` | Acoustic pressure wave propagation |
+| `RSolverAcoustic` | Acoustic wave propagation, transient and harmonic |
 | `RSolverElectrostatics` | Electrostatic field analysis |
 | `RSolverMagnetostatics` | Magnetostatic field analysis |
 | `RSolverWave` | General wave equation |

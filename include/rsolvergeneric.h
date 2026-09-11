@@ -114,7 +114,7 @@ class RSolverGeneric
         double findMeshScale() const;
 
         //! Update local rotations.
-        void updateLocalRotations();
+        virtual void updateLocalRotations();
 
         //! Clear shared data.
         virtual void clearSharedData();
@@ -188,7 +188,7 @@ class RSolverGeneric
         void syncShared(const QString &keyName, RRVector &values);
 
         //! Find computable elements based on assigned material properties or has boundary condition assigned.
-        void findComputableElements(RProblemType problemType);
+        virtual void findComputableElements(RProblemType problemType);
 
         //! Find includable elements (not computed in coefficient matrix) - all points are computable.
         void findIncludableElements();

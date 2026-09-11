@@ -26,7 +26,6 @@ void RSolver::_init()
         QString problemConvergenceFileName(RFileUtils::getFileNameWithSuffix(this->convergenceFileName,RProblem::getId(problemTypes[i])));
         if (problemTypes[i] == R_PROBLEM_ACOUSTICS)
         {
-            // NOT WORKING
             this->solvers[problemTypes[i]] = new RSolverAcoustic(this->pModel,this->modelFileName,problemConvergenceFileName,this->sharedData);
         }
         else if (problemTypes[i] == R_PROBLEM_FLUID_PARTICLE)
@@ -108,7 +107,22 @@ void RSolver::run()
     RTimeSolver &timeSolver = this->pModel->getTimeSolver();
     timeSolver.harmonizeTimesWithInput(this->pModel->getProblemSetup().getRestart());
 
-    if (timeSolver.getEnabled() && RProblem::getTimeSolverEnabled(this->pModel->getProblemTaskTree().getProblemTypeMask()))
+    // A harmonic acoustic analysis is a frequency domain analysis - the solver
+    // sweeps frequencies internally and must not be driven by the time loop.
+    bool harmonicAcoustics = (this->pModel->getProblemTaskTree().getProblemTypeMask() & R_PROBLEM_ACOUSTICS) &&
+                             (this->pModel->getProblemSetup().getAcousticSetup().getAnalysisType() == R_ACOUSTIC_ANALYSIS_HARMONIC);
+
+    if (harmonicAcoustics)
+    {
+        if (timeSolver.getEnabled())
+        {
+            RLogger::warning("Harmonic acoustic analysis is solved in the frequency domain - time stepping is skipped.\n");
+        }
+        // The time solver setup is left untouched so that switching back to a
+        // transient analysis does not lose it.
+        this->runSingle();
+    }
+    else if (timeSolver.getEnabled() && RProblem::getTimeSolverEnabled(this->pModel->getProblemTaskTree().getProblemTypeMask()))
     {
         if (this->pModel->getProblemSetup().getRestart())
         {
