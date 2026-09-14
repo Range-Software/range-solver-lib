@@ -1,4 +1,5 @@
 #include <atomic>
+#include <cmath>
 
 #include <omp.h>
 
@@ -60,6 +61,9 @@ class FluidHeatMatrixContainer
         }
 };
 
+const QString RSolverFluidHeat::fluidNodeTemperatureKey("fluid-node-temperature");
+const QString RSolverFluidHeat::fluidNodeVelocityKey("fluid-node-velocity");
+
 RSolverFluidHeat::RSolverFluidHeat(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
     , statsCounter(0)
@@ -86,7 +90,9 @@ double RSolverFluidHeat::findTemperatureScale() const
 void RSolverFluidHeat::generateNodeHeatVector()
 {
     RBVector heatSetValues;
-    this->generateVariableVector(R_VARIABLE_HEAT,this->elementHeat,heatSetValues,true,this->firstRun,this->firstRun);
+    // The Heat boundary condition prescribes the total heat input for the whole
+    // entity - it is spread over the entity measure to give the source density.
+    this->generateHeatVector(this->elementHeat,heatSetValues);
 
     this->nodeHeat.fill(0.0); // Heat on node is meant as an input - needs to be cleared
     this->pModel->convertElementToNodeVector(this->elementHeat,heatSetValues,this->nodeHeat,true);
@@ -119,6 +125,26 @@ void RSolverFluidHeat::generateNodeHeatVector()
         }
         this->nodeHeat[i] += qv[i] / double(qc[i]);
     }
+}
+
+void RSolverFluidHeat::storeSharedData()
+{
+    this->RSolverGeneric::storeSharedData();
+
+    // Published under a key of its own so the heat solver can drive its Forced
+    // convection walls with it. The shared element temperature will not do - the
+    // heat solve overwrites that over the whole mesh once it has run.
+    this->pSharedData->addData(RSolverFluidHeat::fluidNodeTemperatureKey,this->nodeTemperature);
+
+    // The correlation needs a mean velocity, so the magnitude is enough.
+    RRVector nodeVelocityMagnitude(this->pModel->getNNodes(),0.0);
+    for (uint i=0;i<this->pModel->getNNodes();i++)
+    {
+        nodeVelocityMagnitude[i] = std::sqrt(this->nodeVelocity.x[i]*this->nodeVelocity.x[i]
+                                           + this->nodeVelocity.y[i]*this->nodeVelocity.y[i]
+                                           + this->nodeVelocity.z[i]*this->nodeVelocity.z[i]);
+    }
+    this->pSharedData->addData(RSolverFluidHeat::fluidNodeVelocityKey,nodeVelocityMagnitude);
 }
 
 void RSolverFluidHeat::initialize()

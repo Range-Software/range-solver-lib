@@ -99,6 +99,11 @@ class RSolverGeneric
         //! Check if solver has converged.
         virtual bool hasConverged() const = 0;
 
+        //! Number of modes the last eigen-value solve actually produced. The
+        //! eigen-value solver can return fewer than were requested, so the
+        //! result loop must not assume it got all of them.
+        virtual uint getNComputedModes() const;
+
         //! Update old records.
         static void updateOldRecords(const RTimeSolver &rTimeSolver, const QString &modelFileName);
 
@@ -175,6 +180,20 @@ class RSolverGeneric
                                     bool initialConditions,
                                     bool environmentConditions,
                                     bool onlyExplicitBcs = false) const;
+
+        //! Generate element vector holding the heat source density prescribed by
+        //! the Heat boundary condition.
+        //! The condition prescribes the total heat input [W] for the whole entity,
+        //! while the assembly integrates the element value over the element measure.
+        //! The total is therefore spread over the measure of the entity it is
+        //! applied to - its volume, area or length - which turns it into [W/m^3],
+        //! [W/m^2] or [W/m] respectively. A point entity carries no measure, so the
+        //! total is split evenly between its elements.
+        void generateHeatVector(RRVector &heatValues, RBVector &setValues) const;
+
+        //! Return summed measure - volume, area or length - of all computable
+        //! elements of the group. Point groups return the number of such elements.
+        double findElementGroupMeasure(const RElementGroup &rElementGroup) const;
 
         //! Recover variable.
         void recoverVariable(RVariableType variableType,

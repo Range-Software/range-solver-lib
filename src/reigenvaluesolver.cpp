@@ -233,8 +233,10 @@ void REigenValueSolver::solveSubspaceIteration(const RSparseMatrix &M, const RSp
         return;
     }
 
-    // A few extra vectors make the wanted eigen pairs converge markedly faster.
-    uint m = std::min(n,std::max(nEigen+4,2*nEigen));
+    // A few extra vectors make the wanted eigen pairs converge markedly faster,
+    // but every vector of the subspace costs a linear solve in every iteration.
+    // q = min(2p,p+8) is the usual compromise between the two.
+    uint m = std::min(n,std::min(2*nEigen,nEigen+8));
 
     RRMatrix X(n,m,0.0);
     RRMatrix Y(n,m,0.0);
@@ -263,14 +265,22 @@ void REigenValueSolver::solveSubspaceIteration(const RSparseMatrix &M, const RSp
     RRVector y(n,0.0);
     RRVector b(n,0.0);
 
+    // State the cost before starting - it is set by the number of requested
+    // eigen values and is the first thing to reduce when a run takes too long.
+    RLogger::info("Extracting %u eigen values from a subspace of %u vectors - up to %u iterations of %u linear solves each.\n",
+                  nEigen,m,nIterations,m);
+
     for (uint it=0;it<nIterations;it++)
     {
         RLogger::info("Subspace iteration %u of %u\n",it+1,nIterations);
         RLogger::indent();
 
-        // Y = K^-1 * M * X, one column at a time.
+        // Y = K^-1 * M * X, one column at a time. Each column is a full linear
+        // solve, so the progress is reported - a subspace iteration of a large
+        // model takes a long time and is otherwise silent.
         for (uint j=0;j<m;j++)
         {
+            RLogger::info("Subspace vector %u of %u\n",j+1,m);
             for (uint i=0;i<n;i++)
             {
                 x[i] = X[i][j];
@@ -412,11 +422,13 @@ void REigenValueSolver::solveSubspaceIteration(const RSparseMatrix &M, const RSp
         m = mKept;
         Y.resize(n,mKept,0.0);
 
-        // Converged when the wanted eigen values stop moving.
+        // Converged when the wanted eigen values stop moving. The change is
+        // measured over all of them, so the slowest converging wanted mode -
+        // always the highest one - decides.
         bool converged = (it > 0);
         uint nWanted = std::min(nEigen,mKept);
         double maxChange = 0.0;
-        for (uint j=0;j<nWanted && converged;j++)
+        for (uint j=0;j<nWanted;j++)
         {
             double scale = std::max(std::fabs(theta[j]),RConstants::eps);
             double change = std::fabs(theta[j]-thetaOld[j]) / scale;
@@ -428,7 +440,7 @@ void REigenValueSolver::solveSubspaceIteration(const RSparseMatrix &M, const RSp
         }
         if (it > 0)
         {
-            RLogger::info("Convergence rate = %g\n",maxChange);
+            RLogger::info("Convergence rate = %g (required %g)\n",maxChange,convergenceValue);
         }
 
         thetaOld = theta;
@@ -439,9 +451,21 @@ void REigenValueSolver::solveSubspaceIteration(const RSparseMatrix &M, const RSp
         {
             break;
         }
+        if (it + 1 == nIterations)
+        {
+            RLogger::warning("Subspace iteration did not converge in %u iterations - the last change of the wanted eigen values was %g against the required %g. "
+                             "Extracting fewer modes, raising the convergence value or raising the number of iterations may be needed.\n",
+                             nIterations,maxChange,convergenceValue);
+        }
     }
 
     uint nFound = std::min(nEigen,uint(theta.size()));
+
+    if (nFound < nEigen)
+    {
+        RLogger::warning("Only %u of the %u requested eigen values could be extracted - the subspace lost independent directions.\n",nFound,nEigen);
+    }
+
     d.resize(nFound,0.0);
     ev.resize(nFound,n,0.0);
 
@@ -550,22 +574,14 @@ uint REigenValueSolver::orthonormalizeColumns(RRMatrix &X)
     uint m = X.getNColumns();
     uint kept = 0;
 
+    // A column is dependent when the orthogonalization leaves almost nothing of
+    // it. What is left has to be measured against the length the column started
+    // with: the columns arrive as K^-1 * M * x, so their length carries the
+    // magnitude of the matrices and says nothing about linear independence.
+    const double dependencyTolerance = 1.0e-8;
+
     for (uint j=0;j<m;j++)
     {
-        // Modified Gram-Schmidt against the columns already kept.
-        for (uint l=0;l<kept;l++)
-        {
-            double dot = 0.0;
-            for (uint i=0;i<n;i++)
-            {
-                dot += X[i][l] * X[i][j];
-            }
-            for (uint i=0;i<n;i++)
-            {
-                X[i][j] -= dot * X[i][l];
-            }
-        }
-
         double norm = 0.0;
         for (uint i=0;i<n;i++)
         {
@@ -573,7 +589,46 @@ uint REigenValueSolver::orthonormalizeColumns(RRMatrix &X)
         }
         norm = std::sqrt(norm);
 
-        if (norm < RConstants::eps)
+        if (norm == 0.0)
+        {
+            // Nothing to normalize - the column is exactly zero.
+            continue;
+        }
+
+        for (uint i=0;i<n;i++)
+        {
+            X[i][j] /= norm;
+        }
+
+        // Modified Gram-Schmidt against the columns already kept, run twice.
+        // A single pass loses orthogonality when the columns are nearly
+        // parallel, which is what subspace iteration drives them towards.
+        for (uint pass=0;pass<2;pass++)
+        {
+            for (uint l=0;l<kept;l++)
+            {
+                double dot = 0.0;
+                for (uint i=0;i<n;i++)
+                {
+                    dot += X[i][l] * X[i][j];
+                }
+                for (uint i=0;i<n;i++)
+                {
+                    X[i][j] -= dot * X[i][l];
+                }
+            }
+        }
+
+        // The column is a unit vector, so what is left of it after the
+        // projection is the sine of the angle to the space already spanned.
+        norm = 0.0;
+        for (uint i=0;i<n;i++)
+        {
+            norm += X[i][j] * X[i][j];
+        }
+        norm = std::sqrt(norm);
+
+        if (norm < dependencyTolerance)
         {
             // Dependent direction - drop it.
             continue;

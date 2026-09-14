@@ -69,6 +69,15 @@ void RSolverGeneric::run(bool firstExecution, uint taskIteration)
             nModes = 1;
         }
 
+        // Only the modes which were actually produced can be stored. The eigen
+        // value solver can return fewer than were asked for.
+        uint nComputedModes = this->getNComputedModes();
+        if (nComputedModes < nModes)
+        {
+            RLogger::warning("Only %u of the %u requested modes were computed - the remaining modes are not stored.\n",nComputedModes,nModes);
+            nModes = nComputedModes;
+        }
+
         for (uint i=0;i<nModes;i++)
         {
             uint mode = nModes - (i + 1);
@@ -188,6 +197,11 @@ void RSolverGeneric::run(bool firstExecution, uint taskIteration)
     }
 
     this->meshChanged = (this->problemType == R_PROBLEM_MESH);
+}
+
+uint RSolverGeneric::getNComputedModes() const
+{
+    return 0;
 }
 
 bool RSolverGeneric::getMeshChanged() const
@@ -825,6 +839,100 @@ void RSolverGeneric::generateVariableVector(RVariableType variableType,
             }
         }
     }
+}
+
+void RSolverGeneric::generateHeatVector(RRVector &heatValues, RBVector &setValues) const
+{
+    unsigned int ne = this->pModel->getNElements();
+
+    heatValues.resize(ne);
+    heatValues.fill(0.0);
+    setValues.resize(ne);
+    setValues.fill(false);
+
+    for (unsigned int i=0;i<this->pModel->getNElementGroups();i++)
+    {
+        const RElementGroup *pElementGroup = this->pModel->getElementGroupPtr(i);
+        if (!pElementGroup)
+        {
+            throw RError(RError::Type::Application,R_ERROR_REF,"Element group could not be found (%u of %u).",i,this->pModel->getNElementGroups());
+        }
+
+        for (unsigned int j=0;j<pElementGroup->getNBoundaryConditions();j++)
+        {
+            const RBoundaryCondition &bc = pElementGroup->getBoundaryCondition(j);
+            unsigned int bcComponentPosition = bc.findComponentPosition(R_VARIABLE_HEAT);
+            if (bcComponentPosition == RConstants::eod)
+            {
+                continue;
+            }
+            const RConditionComponent &conditionComponent = bc.getComponent(bcComponentPosition);
+            if (!conditionComponent.getEnabled())
+            {
+                continue;
+            }
+            double totalHeat = conditionComponent.get(this->pModel->getTimeSolver().getCurrentTime());
+
+            double measure = this->findElementGroupMeasure(*pElementGroup);
+            if (measure < RConstants::eps)
+            {
+                RLogger::warning("Heat boundary condition on entity \'%s\' is ignored - the entity has no computable elements.\n",
+                                 pElementGroup->getName().toUtf8().constData());
+                continue;
+            }
+
+            for (unsigned int k=0;k<pElementGroup->size();k++)
+            {
+                unsigned int elementID = pElementGroup->get(k);
+                if (!this->computableElements[elementID])
+                {
+                    continue;
+                }
+                heatValues[elementID] = totalHeat / measure;
+                setValues[elementID] = true;
+            }
+        }
+    }
+}
+
+double RSolverGeneric::findElementGroupMeasure(const RElementGroup &rElementGroup) const
+{
+    double measure = 0.0;
+
+    for (unsigned int i=0;i<rElementGroup.size();i++)
+    {
+        unsigned int elementID = rElementGroup.get(i);
+        if (!this->computableElements[elementID])
+        {
+            continue;
+        }
+
+        const RElement &rElement = this->pModel->getElement(elementID);
+        double elementMeasure = 0.0;
+
+        switch (RElementGroup::getGroupType(rElement.getType()))
+        {
+            case R_ENTITY_GROUP_POINT:
+                // A point has no measure to spread the heat over - count it instead.
+                elementMeasure = 1.0;
+                break;
+            case R_ENTITY_GROUP_LINE:
+                rElement.findLength(this->pModel->getNodes(),elementMeasure);
+                break;
+            case R_ENTITY_GROUP_SURFACE:
+                rElement.findArea(this->pModel->getNodes(),elementMeasure);
+                break;
+            case R_ENTITY_GROUP_VOLUME:
+                rElement.findVolume(this->pModel->getNodes(),elementMeasure);
+                break;
+            default:
+                break;
+        }
+
+        measure += elementMeasure;
+    }
+
+    return measure;
 }
 
 void RSolverGeneric::recoverVariable(RVariableType variableType,

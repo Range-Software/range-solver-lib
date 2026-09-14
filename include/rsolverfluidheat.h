@@ -60,6 +60,14 @@ class RSolverFluidHeat : public RSolverGeneric
 
     public:
 
+        //! Key the solved fluid node temperature is shared under, so the heat
+        //! solver can drive its Forced convection walls with it.
+        static const QString fluidNodeTemperatureKey;
+
+        //! Key the fluid node velocity magnitude is shared under, for the same
+        //! reason. Recovered from the fluid solver results, not solved here.
+        static const QString fluidNodeVelocityKey;
+
         //! Constructor.
         explicit RSolverFluidHeat(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData);
 
@@ -78,6 +86,9 @@ class RSolverFluidHeat : public RSolverGeneric
         void generateNodeHeatVector();
 
         //! Initialize solver.
+        //! Store solver results into the shared data container.
+        void storeSharedData() override;
+
         void initialize() override;
 
         //! Update scales.

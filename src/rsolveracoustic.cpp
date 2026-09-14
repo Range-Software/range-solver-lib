@@ -33,10 +33,10 @@ double RSolverAcoustic::findNewmarkGamma()
 
 double RSolverAcoustic::findNewmarkBeta() const
 {
-    // The time-march approximation coefficient is 0.0 for the backward and 0.5
-    // for the central approximation. Newmark requires beta > 0 and beta >= 1/4
-    // (with gamma = 1/2) for unconditional stability, so the coefficient is
-    // clamped to the average-acceleration scheme.
+    // The time-march approximation coefficient is 1.0 for the backward, 0.5 for
+    // the central and 0.0 for the forward approximation. Newmark requires
+    // beta > 0 and beta >= 1/4 (with gamma = 1/2) for unconditional stability,
+    // so the coefficient is clamped to the average-acceleration scheme.
     double beta = this->pModel->getTimeSolver().getTimeMarchApproximationCoefficient() / 2.0;
     return std::max(beta,0.25);
 }

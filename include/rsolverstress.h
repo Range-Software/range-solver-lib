@@ -63,6 +63,9 @@ class RSolverStress : public RSolverGeneric
         //! Check if solver has converged.
         bool hasConverged() const override;
 
+        //! Number of modes the last eigen-value solve actually produced.
+        uint getNComputedModes() const override;
+
     protected:
 
         //! Initialize solver.

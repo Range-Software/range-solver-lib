@@ -82,8 +82,54 @@
     solver overrides it, because its frames come from the constraints rather
     than from the geometry of a single boundary condition.
 
+- **RSolverGeneric::generateHeatVector()** and
+  **RSolverGeneric::findElementGroupMeasure()** new. The *Heat* boundary
+  condition prescribes the total heat input in `[W]` for the whole entity, so
+  the total is now spread over the measure of the entity it is applied to - the
+  volume, area or length of its computable elements, or their count on a point -
+  giving the source density the assembly integrates. See the bug fix below.
+- **RSolverHeat:** the *Forced convection* boundary condition is coupled to the
+  fluid heat solver.
+  - **RSolverHeat::findFluidElements()** pairs every surface element with the
+    volume element on its fluid side, a fluid being an element group whose
+    material carries the properties **R_PROBLEM_FLUID_HEAT** requires.
+  - **RSolverHeat::findFluidTemperature()** and
+    **RSolverHeat::findFluidVelocity()** read the bulk temperature and the mean
+    speed of that element from the fluid heat solver results. The values
+    configured on the condition are used only where no such result covers the
+    surface - a model with no fluid domain, or the first pass of a coupled run -
+    and the log says which of the two sources is in use.
+  - A velocity of zero the fluid solver computed disables the wall for that pass
+    with a warning, rather than falling back to a value the flow contradicts.
+  - **RSolverHeat::getForcedConvection()** became a per element call, because
+    both quantities vary along the wall.
+- **RSolverFluidHeat::storeSharedData()** publishes the solved node temperature
+  and the node velocity magnitude under keys of their own. The shared element
+  temperature will not do - the heat solve overwrites it over the whole mesh.
+- **RSolverHeat::checkConvectionInput()** new. A value configured on a
+  correlated convection condition which would leave the correlation with nothing
+  to work with now stops the solver, naming the component and the entity,
+  instead of being papered over by the division guards of **RConvection** and
+  yielding `h = 0` on a surface that never cools. The dimensionless groups
+  divide by the dynamic viscosity, the thermal conductivity and the hydraulic
+  diameter, and a zero density, heat capacity or mean velocity collapses them
+  just as surely.
+
 ### Bug fixes
 
+- **RSolverHeat** and **RSolverFluidHeat:** the *Heat* boundary condition is
+  labelled `[W]`, but its value was handed to the assembly as a source density
+  and integrated over the element measure, so it acted as `W/m^3` on a volume,
+  `W/m^2` on a surface and `W/m` on a line. Only on a point did the label match.
+  The non-dimensionalisation scaled it as a total power as well, so the power
+  delivered also depended on the size of the model: a beam carrying `1000 W` on
+  a `0.01 m^2` face received `40 W`. The total is now spread over the entity and
+  the energy balance closes on the value entered.
+- **RSolverHeat::getForcedConvection():** the condition was created without a
+  *Fluid temperature* component while the solver demanded one, so any model
+  carrying it stopped with `Failed to find 'Fluid temperature' component in
+  'Forced convection' boundary condition`. The temperature now comes from the
+  fluid heat solver, with the new component as the fall-back.
 - **RSolverStress::assemblyMatrix():** the mass matrix of a modal analysis was
   assembled from the element matrix before the local rotations were applied,
   while the stiffness matrix was assembled after them. A mode shape of a model

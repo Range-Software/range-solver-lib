@@ -23,6 +23,11 @@ bool RSolverStress::hasConverged() const
     return true;
 }
 
+uint RSolverStress::getNComputedModes() const
+{
+    return uint(this->d.size());
+}
+
 void RSolverStress::initialize()
 {
 }

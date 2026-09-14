@@ -1,8 +1,10 @@
 #include <atomic>
+#include <cmath>
 
 #include <omp.h>
 
 #include "rsolverheat.h"
+#include "rsolverfluidheat.h"
 #include "rconvection.h"
 #include "rmatrixsolver.h"
 
@@ -19,6 +21,158 @@ RSolverHeat::~RSolverHeat()
 bool RSolverHeat::hasConverged() const
 {
     return true;
+}
+
+void RSolverHeat::recoverSharedData()
+{
+    this->RSolverGeneric::recoverSharedData();
+
+    // Forced convection walls are driven by the fluid heat solver result. It is
+    // kept apart from the shared element temperature, which this solver
+    // overwrites over the whole mesh once it has run.
+    this->fluidNodeTemperature.clear();
+    if (this->pSharedData->hasData(RSolverFluidHeat::fluidNodeTemperatureKey,this->pModel->getNNodes()))
+    {
+        this->fluidNodeTemperature = this->pSharedData->findData(RSolverFluidHeat::fluidNodeTemperatureKey);
+    }
+
+    this->fluidNodeVelocity.clear();
+    if (this->pSharedData->hasData(RSolverFluidHeat::fluidNodeVelocityKey,this->pModel->getNNodes()))
+    {
+        this->fluidNodeVelocity = this->pSharedData->findData(RSolverFluidHeat::fluidNodeVelocityKey);
+    }
+}
+
+bool RSolverHeat::findFluidTemperature(uint elementId, double &fluidTemperature) const
+{
+    if (this->fluidNodeTemperature.size() != this->pModel->getNNodes())
+    {
+        return false;
+    }
+    if (elementId >= this->fluidElements.size())
+    {
+        return false;
+    }
+
+    uint fluidElementID = this->fluidElements[elementId];
+    if (fluidElementID == RConstants::eod)
+    {
+        return false;
+    }
+
+    // The bulk temperature of the fluid element behind the wall - not the wall
+    // node temperature, which the conformal mesh shares with the solid.
+    const RElement &rFluidElement = this->pModel->getElement(fluidElementID);
+    double temperature = 0.0;
+    for (uint i=0;i<rFluidElement.size();i++)
+    {
+        temperature += this->fluidNodeTemperature[rFluidElement.getNodeId(i)];
+    }
+    fluidTemperature = temperature / double(rFluidElement.size());
+
+    return true;
+}
+
+bool RSolverHeat::findFluidVelocity(uint elementId, double &fluidVelocity) const
+{
+    if (this->fluidNodeVelocity.size() != this->pModel->getNNodes())
+    {
+        return false;
+    }
+    if (elementId >= this->fluidElements.size())
+    {
+        return false;
+    }
+
+    uint fluidElementID = this->fluidElements[elementId];
+    if (fluidElementID == RConstants::eod)
+    {
+        return false;
+    }
+
+    const RElement &rFluidElement = this->pModel->getElement(fluidElementID);
+    double velocity = 0.0;
+    for (uint i=0;i<rFluidElement.size();i++)
+    {
+        velocity += this->fluidNodeVelocity[rFluidElement.getNodeId(i)];
+    }
+    fluidVelocity = velocity / double(rFluidElement.size());
+
+    return true;
+}
+
+void RSolverHeat::findFluidElements()
+{
+    this->fluidElements.resize(this->pModel->getNElements());
+    this->fluidElements.fill(RConstants::eod);
+
+    // An element belongs to the fluid domain when its material carries the
+    // properties the fluid heat solver needs - the dynamic viscosity being the
+    // one a solid does not have.
+    QList<RMaterialProperty::Type> propList;
+    for (uint i=0;i<RMaterialProperty::nTypes;i++)
+    {
+        if (R_PROBLEM_FLUID_HEAT & RMaterialProperty::getProblemTypeMask(RMaterialProperty::Type(i)))
+        {
+            propList.push_back(RMaterialProperty::Type(i));
+        }
+    }
+
+    // Index fluid volume elements by node so the search below stays local.
+    std::vector<std::vector<uint>> nodeToFluidElements(this->pModel->getNNodes());
+    for (uint i=0;i<this->pModel->getNElementGroups();i++)
+    {
+        const RElementGroup *pElementGroup = this->pModel->getElementGroupPtr(i);
+        if (!pElementGroup->getMaterial().hasProperties(propList))
+        {
+            continue;
+        }
+        for (uint j=0;j<pElementGroup->size();j++)
+        {
+            uint elementID = pElementGroup->get(j);
+            const RElement &rElement = this->pModel->getElement(elementID);
+            if (!R_ELEMENT_TYPE_IS_VOLUME(rElement.getType()))
+            {
+                continue;
+            }
+            for (uint k=0;k<rElement.size();k++)
+            {
+                nodeToFluidElements[rElement.getNodeId(k)].push_back(elementID);
+            }
+        }
+    }
+
+    // A wall is a surface element whose nodes are all shared with a fluid volume
+    // element - the mesh is conformal, so the fluid element on the other side of
+    // the wall contains the whole face.
+    for (uint i=0;i<this->pModel->getNSurfaces();i++)
+    {
+        const RSurface &rSurface = this->pModel->getSurface(i);
+
+        for (uint j=0;j<rSurface.size();j++)
+        {
+            uint elementID = rSurface.get(j);
+            const RElement &rElement = this->pModel->getElement(elementID);
+
+            for (uint fluidElementID : nodeToFluidElements[rElement.getNodeId(0)])
+            {
+                const RElement &rFluidElement = this->pModel->getElement(fluidElementID);
+                uint nNodesFound = 0;
+                for (uint k=0;k<rElement.size();k++)
+                {
+                    if (rFluidElement.hasNodeId(rElement.getNodeId(k)))
+                    {
+                        nNodesFound++;
+                    }
+                }
+                if (nNodesFound == rElement.size())
+                {
+                    this->fluidElements[elementID] = fluidElementID;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 double RSolverHeat::findTemperatureScale() const
@@ -70,13 +224,28 @@ void RSolverHeat::prepare()
 
     RBVector temperatureSetValues;
     RBVector heatSetValues;
+    RBVector heatRateAreaSetValues;
+    RBVector heatRateVolumeSetValues;
+
+    if (this->fluidElements.size() != this->pModel->getNElements())
+    {
+        this->findFluidElements();
+    }
 
     this->generateNodeBook(R_PROBLEM_HEAT);
 
 //    this->pModel->convertNodeToElementVector(this->nodeTemperature,this->elementTemperature);
 
     this->generateVariableVector(R_VARIABLE_TEMPERATURE,this->elementTemperature,temperatureSetValues,true,this->firstRun,this->firstRun);
-    this->generateVariableVector(R_VARIABLE_HEAT,this->elementHeat,heatSetValues,true,this->firstRun,this->firstRun);
+    // The Heat boundary condition prescribes the total heat input for the whole
+    // entity - it is spread over the entity measure to give the source density
+    // the assembly below integrates.
+    this->generateHeatVector(this->elementHeat,heatSetValues);
+    // Heat rate per unit area / volume are boundary conditions only - they are
+    // applied to surface and volume elements respectively, where the source
+    // term is already integrated over the element measure.
+    this->generateVariableVector(R_VARIABLE_HEAT_RATE_AREA,this->elementHeatRateArea,heatRateAreaSetValues,true,false,false);
+    this->generateVariableVector(R_VARIABLE_HEAT_RATE_VOLUME,this->elementHeatRateVolume,heatRateVolumeSetValues,true,false,false);
     this->generateMaterialVecor(RMaterialProperty::ThermalConductivity,this->elementConduction);
     this->generateMaterialVecor(RMaterialProperty::HeatCapacity,this->elementCapacity);
     this->generateMaterialVecor(RMaterialProperty::Density,this->elementDensity);
@@ -272,7 +441,7 @@ void RSolverHeat::prepare()
         double surfaceHtt = 0.0;
 
         this->getSimpleConvection(surface,surfaceHtc,surfaceHtt);
-        this->getForcedConvection(surface,surfaceHtc,surfaceHtt);
+        this->reportForcedConvection(surface);
 
         std::atomic<bool> abort{false};
         #pragma omp parallel for default(shared)
@@ -295,10 +464,11 @@ void RSolverHeat::prepare()
                 RRVector fe(element.size());
                 RRMatrix B(element.size(),2);
 
-                // htc/htt must be per-iteration - getNaturalConvection()
-                // overwrites them per element and the loop runs in parallel.
+                // htc/htt must be per-iteration - the correlated conditions
+                // overwrite them per element and the loop runs in parallel.
                 double htc = surfaceHtc;
                 double htt = surfaceHtt;
+                this->getForcedConvection(surface,elementID,htc,htt);
                 this->getNaturalConvection(surface,elementID,htc,htt);
 
                 Me.fill(0.0);
@@ -343,7 +513,7 @@ void RSolverHeat::prepare()
                             }
                         }
                         // Force
-                        fe[m] += (this->elementHeat[elementID] + this->elementRadiativeHeat[elementID] + this->elementJouleHeat[elementID]) * N[m] * detJ * shapeFunc.getW();
+                        fe[m] += (this->elementHeat[elementID] + this->elementHeatRateArea[elementID] + this->elementRadiativeHeat[elementID] + this->elementJouleHeat[elementID]) * N[m] * detJ * shapeFunc.getW();
                     }
                 }
 
@@ -445,7 +615,7 @@ void RSolverHeat::prepare()
                             }
                         }
                         // Force
-                        fe[m] += (this->elementHeat[elementID] + this->elementJouleHeat[elementID]) * N[m] * detJ * shapeFunc.getW();
+                        fe[m] += (this->elementHeat[elementID] + this->elementHeatRateVolume[elementID] + this->elementJouleHeat[elementID]) * N[m] * detJ * shapeFunc.getW();
                     }
                 }
                 this->assemblyMatrix(elementID,Me,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())]);
@@ -514,6 +684,11 @@ void RSolverHeat::process()
     // Initialize heat flux vector vector
     this->elementHeatFlux.resize(this->pModel->getNElements(),RR3Vector(0.0,0.0,0.0));
 
+    // Initialize heat transfer coefficient vector. It stays zero on every
+    // element which carries no convection boundary condition.
+    this->elementHeatTransferCoefficient.resize(this->pModel->getNElements());
+    this->elementHeatTransferCoefficient.fill(0.0);
+
     // Process line elements.
     for (uint i=0;i<this->pModel->getNLines();i++)
     {
@@ -544,13 +719,16 @@ void RSolverHeat::process()
                     const RElementShapeFunction &shapeFunc = RElement::getShapeFunction(element.getType(),k);
                     const RRMatrix &dN = shapeFunc.getDN();
                     RRMatrix J, Rt;
-                    double detJ = this->pModel->getElement(elementID).findJacobian(this->pModel->getNodes(),k,J,Rt);
+                    // Heat flux is a density - the shape function derivatives
+                    // are averaged over the integration points and must not be
+                    // weighted by the Jacobian determinant.
+                    this->pModel->getElement(elementID).findJacobian(this->pModel->getNodes(),k,J,Rt);
 
                     if (line.getCrossArea() != 0.0)
                     {
                         for (uint m=0;m<dN.getNRows();m++)
                         {
-                            B[m] += dN[m][0] * J[0][0] * detJ / double(nInp);
+                            B[m] += dN[m][0] * J[0][0] / double(nInp);
                         }
                     }
                 }
@@ -582,11 +760,10 @@ void RSolverHeat::process()
     {
         RSurface &surface = this->pModel->getSurface(i);
 
-        double htc = 0.0;
-        double htt = 0.0;
+        double surfaceHtc = 0.0;
+        double surfaceHtt = 0.0;
 
-        this->getSimpleConvection(surface,htc,htt);
-        this->getForcedConvection(surface,htc,htt);
+        this->getSimpleConvection(surface,surfaceHtc,surfaceHtt);
 
         for (uint j=0;j<surface.size();j++)
         {
@@ -601,7 +778,12 @@ void RSolverHeat::process()
             uint nInp = RElement::getNIntegrationPoints(element.getType());
             RRMatrix B(element.size(),2);
 
+            double htc = surfaceHtc;
+            double htt = surfaceHtt;
+            this->getForcedConvection(surface,elementID,htc,htt);
             this->getNaturalConvection(surface,elementID,htc,htt);
+
+            this->elementHeatTransferCoefficient[elementID] = htc;
 
             Qx = Qy = Qz = 0.0;
 
@@ -616,14 +798,15 @@ void RSolverHeat::process()
                     const RElementShapeFunction &shapeFunc = RElement::getShapeFunction(element.getType(),k);
                     const RRMatrix &dN = shapeFunc.getDN();
                     RRMatrix J, Rt;
-                    double detJ = this->pModel->getElement(elementID).findJacobian(this->pModel->getNodes(),k,J,Rt);
+                    // Heat flux is a density - see the line element loop above.
+                    this->pModel->getElement(elementID).findJacobian(this->pModel->getNodes(),k,J,Rt);
 
                     if (surface.getThickness() != 0.0)
                     {
                         for (uint m=0;m<dN.getNRows();m++)
                         {
-                            B[m][0] += (dN[m][0]*J[0][0] + dN[m][1]*J[0][1]) * detJ / double(nInp);
-                            B[m][1] += (dN[m][0]*J[1][0] + dN[m][1]*J[1][1]) * detJ / double(nInp);
+                            B[m][0] += (dN[m][0]*J[0][0] + dN[m][1]*J[0][1]) / double(nInp);
+                            B[m][1] += (dN[m][0]*J[1][0] + dN[m][1]*J[1][1]) / double(nInp);
                         }
                     }
                 }
@@ -645,15 +828,14 @@ void RSolverHeat::process()
                 Qz += R[2][0]*Qi + R[2][1]*Qj;
             }
 
-            // Convection
+            // Convection - Newton's law of cooling gives a flux density, so the
+            // element area must not enter here.
             if (htc > 0.0)
             {
                 RR3Vector normal;
-                double area;
-                if (element.findNormal(this->pModel->getNodes(),normal[0],normal[1],normal[2]) &&
-                    element.findArea(this->pModel->getNodes(),area))
+                if (element.findNormal(this->pModel->getNodes(),normal[0],normal[1],normal[2]))
                 {
-                    double Qhe = htc * area * (htt - this->elementTemperature[elementID]);
+                    double Qhe = htc * (htt - this->elementTemperature[elementID]);
                     Qx += normal[0] * Qhe;
                     Qy += normal[1] * Qhe;
                     Qz += normal[2] * Qhe;
@@ -695,13 +877,14 @@ void RSolverHeat::process()
                 const RElementShapeFunction &shapeFunc = RElement::getShapeFunction(element.getType(),k);
                 const RRMatrix &dN = shapeFunc.getDN();
                 RRMatrix J, Rt;
-                double detJ = this->pModel->getElement(elementID).findJacobian(this->pModel->getNodes(),k,J,Rt);
+                // Heat flux is a density - see the line element loop above.
+                this->pModel->getElement(elementID).findJacobian(this->pModel->getNodes(),k,J,Rt);
 
                 for (uint m=0;m<dN.getNRows();m++)
                 {
-                    B[m][0] += (dN[m][0]*J[0][0] + dN[m][1]*J[0][1] + dN[m][2]*J[0][2]) * detJ / double(nInp);
-                    B[m][1] += (dN[m][0]*J[1][0] + dN[m][1]*J[1][1] + dN[m][2]*J[1][2]) * detJ / double(nInp);
-                    B[m][2] += (dN[m][0]*J[2][0] + dN[m][1]*J[2][1] + dN[m][2]*J[2][2]) * detJ / double(nInp);
+                    B[m][0] += (dN[m][0]*J[0][0] + dN[m][1]*J[0][1] + dN[m][2]*J[0][2]) / double(nInp);
+                    B[m][1] += (dN[m][0]*J[1][0] + dN[m][1]*J[1][1] + dN[m][2]*J[1][2]) / double(nInp);
+                    B[m][2] += (dN[m][0]*J[2][0] + dN[m][1]*J[2][1] + dN[m][2]*J[2][2]) / double(nInp);
                 }
             }
 
@@ -764,6 +947,24 @@ void RSolverHeat::store()
         heatFlux.setValue(2,i,this->elementHeatFlux[i][2]);
     }
 
+    // Heat transfer coefficient
+    uint heatTransferCoefficientPos = this->pModel->findVariable(R_VARIABLE_HEAT_TRANSFER_COEFFICIENT);
+    if (heatTransferCoefficientPos == RConstants::eod)
+    {
+        heatTransferCoefficientPos = this->pModel->addVariable(R_VARIABLE_HEAT_TRANSFER_COEFFICIENT);
+        this->pModel->getVariable(heatTransferCoefficientPos).getVariableData().setMinMaxDisplayValue(
+                    RStatistics::findMinimumValue(this->elementHeatTransferCoefficient),
+                    RStatistics::findMaximumValue(this->elementHeatTransferCoefficient));
+    }
+    RVariable &heatTransferCoefficient = this->pModel->getVariable(heatTransferCoefficientPos);
+
+    heatTransferCoefficient.setApplyType(R_VARIABLE_APPLY_ELEMENT);
+    heatTransferCoefficient.resize(1,this->pModel->getNElements());
+    for (uint i=0;i<this->pModel->getNElements();i++)
+    {
+        heatTransferCoefficient.setValue(0,i,this->elementHeatTransferCoefficient[i]);
+    }
+
     RLogger::unindent();
 }
 
@@ -771,6 +972,7 @@ void RSolverHeat::statistics()
 {
     this->printStats(R_VARIABLE_TEMPERATURE);
     this->printStats(R_VARIABLE_HEAT_FLUX);
+    this->printStats(R_VARIABLE_HEAT_TRANSFER_COEFFICIENT);
     this->processMonitoringPoints();
 }
 
@@ -874,7 +1076,89 @@ bool RSolverHeat::getSimpleConvection(const RElementGroup &elementGroup, double 
     return true;
 }
 
-bool RSolverHeat::getForcedConvection(const RElementGroup &elementGroup, double &htc, double &htt)
+void RSolverHeat::checkConvectionInput(double value,
+                                       RVariableType variableType,
+                                       RBoundaryConditionType boundaryConditionType,
+                                       const RElementGroup &elementGroup) const
+{
+    if (std::fabs(value) > RConstants::eps)
+    {
+        return;
+    }
+
+    throw RError(RError::Type::Application,R_ERROR_REF,
+                 "Value of \'%s\' configured in \'%s\' boundary condition on entity \'%s\' is zero - the convection correlation can not be evaluated.",
+                 RVariable::getName(variableType).toUtf8().constData(),
+                 RBoundaryCondition::getName(boundaryConditionType).toUtf8().constData(),
+                 elementGroup.getName().toUtf8().constData());
+}
+
+void RSolverHeat::reportForcedConvection(const RElementGroup &elementGroup)
+{
+    if (!elementGroup.hasBoundaryCondition(R_BOUNDARY_CONDITION_CONVECTION_FORCED))
+    {
+        return;
+    }
+
+    double htc = 0.0;
+    double htt = 0.0;
+    double fastestFluid = 0.0;
+    bool temperatureFromFluid = false;
+    bool velocityFromFluid = false;
+    bool applied = false;
+
+    for (uint i=0;i<elementGroup.size();i++)
+    {
+        if (this->findFluidTemperature(elementGroup.get(i),htt))
+        {
+            temperatureFromFluid = true;
+            break;
+        }
+    }
+    for (uint i=0;i<elementGroup.size();i++)
+    {
+        double velocity = 0.0;
+        if (this->findFluidVelocity(elementGroup.get(i),velocity))
+        {
+            velocityFromFluid = true;
+            fastestFluid = std::max(fastestFluid,std::fabs(velocity));
+        }
+    }
+    for (uint i=0;i<elementGroup.size();i++)
+    {
+        if (this->getForcedConvection(elementGroup,elementGroup.get(i),htc,htt))
+        {
+            applied = true;
+            break;
+        }
+    }
+
+    if (!applied)
+    {
+        if (velocityFromFluid && fastestFluid < RConstants::eps)
+        {
+            RLogger::warning("Forced convection on entity \'%s\' is disabled - the fluid heat result has the fluid at rest, so the correlation transfers no heat.\n",
+                             elementGroup.getName().toUtf8().constData());
+        }
+        else
+        {
+            RLogger::warning("Forced convection on entity \'%s\' is ignored - no fluid heat result covers this surface and the condition carries no fluid temperature to fall back on.\n",
+                             elementGroup.getName().toUtf8().constData());
+        }
+        return;
+    }
+    if (!temperatureFromFluid || !velocityFromFluid)
+    {
+        const char *configured = (!temperatureFromFluid && !velocityFromFluid) ? "fluid temperature and velocity"
+                               : (!temperatureFromFluid)                       ? "fluid temperature"
+                                                                               : "velocity";
+        RLogger::info("Forced convection on entity \'%s\' uses the %s configured on the condition - no fluid heat result covers this surface.\n",
+                      elementGroup.getName().toUtf8().constData(),
+                      configured);
+    }
+}
+
+bool RSolverHeat::getForcedConvection(const RElementGroup &elementGroup, uint elementId, double &htc, double &htt)
 {
     if (!elementGroup.hasBoundaryCondition(R_BOUNDARY_CONDITION_CONVECTION_FORCED))
     {
@@ -884,16 +1168,21 @@ bool RSolverHeat::getForcedConvection(const RElementGroup &elementGroup, double 
     RBoundaryCondition bc = elementGroup.getBoundaryCondition(R_BOUNDARY_CONDITION_CONVECTION_FORCED);
     uint cPos = 0;
 
-    // Fluid temperature
-    cPos = bc.findComponentPosition(R_VARIABLE_FLUID_TEMPERATURE);
-    if (cPos == RConstants::eod)
+    // The fluid temperature is normally the one the fluid heat solver computed
+    // on the fluid side of the wall. The value configured on the condition is a
+    // fall-back for a surface no such result covers - one bordering no meshed
+    // fluid, or a run where the fluid heat solver has not produced a result yet.
+    if (!this->findFluidTemperature(elementId,htt))
     {
-        throw RError(RError::Type::Application,R_ERROR_REF,
-                     "Failed to find \'%s\' component in \'%s\' boundary condition.",
-                     RVariable::getName(R_VARIABLE_FLUID_TEMPERATURE).toUtf8().constData(),
-                     RBoundaryCondition::getName(R_BOUNDARY_CONDITION_CONVECTION_FORCED).toUtf8().constData());
+        uint fluidTemperaturePosition = bc.findComponentPosition(R_VARIABLE_FLUID_TEMPERATURE);
+        if (fluidTemperaturePosition == RConstants::eod)
+        {
+            // Conditions stored before the component existed carry no value to
+            // fall back on, so there is nothing to exchange heat with.
+            return false;
+        }
+        htt = bc.getComponent(fluidTemperaturePosition).get(this->pModel->getTimeSolver().getCurrentTime());
     }
-    htt = bc.getComponent(cPos).get(this->pModel->getTimeSolver().getCurrentTime());
 
     // Density
     cPos = bc.findComponentPosition(R_VARIABLE_DENSITY);
@@ -905,6 +1194,7 @@ bool RSolverHeat::getForcedConvection(const RElementGroup &elementGroup, double 
                      RBoundaryCondition::getName(R_BOUNDARY_CONDITION_CONVECTION_FORCED).toUtf8().constData());
     }
     double ro = bc.getComponent(cPos).get(this->pModel->getTimeSolver().getCurrentTime());
+    this->checkConvectionInput(ro,R_VARIABLE_DENSITY,R_BOUNDARY_CONDITION_CONVECTION_FORCED,elementGroup);
 
     // Dynamic viscosity
     cPos = bc.findComponentPosition(R_VARIABLE_DYNAMIC_VISCOSITY);
@@ -916,6 +1206,7 @@ bool RSolverHeat::getForcedConvection(const RElementGroup &elementGroup, double 
                      RBoundaryCondition::getName(R_BOUNDARY_CONDITION_CONVECTION_FORCED).toUtf8().constData());
     }
     double mu = bc.getComponent(cPos).get(this->pModel->getTimeSolver().getCurrentTime());
+    this->checkConvectionInput(mu,R_VARIABLE_DYNAMIC_VISCOSITY,R_BOUNDARY_CONDITION_CONVECTION_FORCED,elementGroup);
 
     // Heat capacity
     cPos = bc.findComponentPosition(R_VARIABLE_HEAT_CAPACITY);
@@ -927,6 +1218,7 @@ bool RSolverHeat::getForcedConvection(const RElementGroup &elementGroup, double 
                      RBoundaryCondition::getName(R_BOUNDARY_CONDITION_CONVECTION_FORCED).toUtf8().constData());
     }
     double c = bc.getComponent(cPos).get(this->pModel->getTimeSolver().getCurrentTime());
+    this->checkConvectionInput(c,R_VARIABLE_HEAT_CAPACITY,R_BOUNDARY_CONDITION_CONVECTION_FORCED,elementGroup);
 
     // Hydraulic diameter
     cPos = bc.findComponentPosition(R_VARIABLE_HYDRAULIC_DIAMETER);
@@ -938,6 +1230,7 @@ bool RSolverHeat::getForcedConvection(const RElementGroup &elementGroup, double 
                      RBoundaryCondition::getName(R_BOUNDARY_CONDITION_CONVECTION_FORCED).toUtf8().constData());
     }
     double d = bc.getComponent(cPos).get(this->pModel->getTimeSolver().getCurrentTime());
+    this->checkConvectionInput(d,R_VARIABLE_HYDRAULIC_DIAMETER,R_BOUNDARY_CONDITION_CONVECTION_FORCED,elementGroup);
 
     // Thermal conductivity
     cPos = bc.findComponentPosition(R_VARIABLE_THERMAL_CONDUCTIVITY);
@@ -949,17 +1242,35 @@ bool RSolverHeat::getForcedConvection(const RElementGroup &elementGroup, double 
                      RBoundaryCondition::getName(R_BOUNDARY_CONDITION_CONVECTION_FORCED).toUtf8().constData());
     }
     double k = bc.getComponent(cPos).get(this->pModel->getTimeSolver().getCurrentTime());
+    this->checkConvectionInput(k,R_VARIABLE_THERMAL_CONDUCTIVITY,R_BOUNDARY_CONDITION_CONVECTION_FORCED,elementGroup);
 
-    // Mean velocity
-    cPos = bc.findComponentPosition(R_VARIABLE_VELOCITY);
-    if (cPos == RConstants::eod)
+    // Mean velocity - like the fluid temperature it is normally the one the
+    // fluid solver computed behind the wall, and the configured value is the
+    // fall-back for a surface no such result covers.
+    double v = 0.0;
+    if (this->findFluidVelocity(elementId,v))
     {
-        throw RError(RError::Type::Application,R_ERROR_REF,
-                     "Failed to find \'%s\' component in \'%s\' boundary condition.",
-                     RVariable::getName(R_VARIABLE_VELOCITY).toUtf8().constData(),
-                     RBoundaryCondition::getName(R_BOUNDARY_CONDITION_CONVECTION_FORCED).toUtf8().constData());
+        if (std::fabs(v) < RConstants::eps)
+        {
+            // The fluid solver has the fluid at rest. That is a result, not a
+            // misconfiguration, so the wall is left unconvected for this pass
+            // rather than falling back to a value the flow contradicts.
+            return false;
+        }
     }
-    double v = bc.getComponent(cPos).get(this->pModel->getTimeSolver().getCurrentTime());
+    else
+    {
+        cPos = bc.findComponentPosition(R_VARIABLE_VELOCITY);
+        if (cPos == RConstants::eod)
+        {
+            throw RError(RError::Type::Application,R_ERROR_REF,
+                         "Failed to find \'%s\' component in \'%s\' boundary condition.",
+                         RVariable::getName(R_VARIABLE_VELOCITY).toUtf8().constData(),
+                         RBoundaryCondition::getName(R_BOUNDARY_CONDITION_CONVECTION_FORCED).toUtf8().constData());
+        }
+        v = bc.getComponent(cPos).get(this->pModel->getTimeSolver().getCurrentTime());
+        this->checkConvectionInput(v,R_VARIABLE_VELOCITY,R_BOUNDARY_CONDITION_CONVECTION_FORCED,elementGroup);
+    }
 
     RConvection convection;
 
@@ -1005,6 +1316,7 @@ bool RSolverHeat::getNaturalConvection(const RElementGroup &elementGroup, uint e
                      RBoundaryCondition::getName(R_BOUNDARY_CONDITION_CONVECTION_NATURAL).toUtf8().constData());
     }
     double mu = bc.getComponent(cPos).get(this->pModel->getTimeSolver().getCurrentTime());
+    this->checkConvectionInput(mu,R_VARIABLE_DYNAMIC_VISCOSITY,R_BOUNDARY_CONDITION_CONVECTION_NATURAL,elementGroup);
 
     // Fluid temperature
     cPos = bc.findComponentPosition(R_VARIABLE_FLUID_TEMPERATURE);
@@ -1027,6 +1339,7 @@ bool RSolverHeat::getNaturalConvection(const RElementGroup &elementGroup, uint e
                      RBoundaryCondition::getName(R_BOUNDARY_CONDITION_CONVECTION_NATURAL).toUtf8().constData());
     }
     double c = bc.getComponent(cPos).get(this->pModel->getTimeSolver().getCurrentTime());
+    this->checkConvectionInput(c,R_VARIABLE_HEAT_CAPACITY,R_BOUNDARY_CONDITION_CONVECTION_NATURAL,elementGroup);
 
     // Hydraulic diameter
     cPos = bc.findComponentPosition(R_VARIABLE_HYDRAULIC_DIAMETER);
@@ -1038,6 +1351,7 @@ bool RSolverHeat::getNaturalConvection(const RElementGroup &elementGroup, uint e
                      RBoundaryCondition::getName(R_BOUNDARY_CONDITION_CONVECTION_NATURAL).toUtf8().constData());
     }
     double d = bc.getComponent(cPos).get(this->pModel->getTimeSolver().getCurrentTime());
+    this->checkConvectionInput(d,R_VARIABLE_HYDRAULIC_DIAMETER,R_BOUNDARY_CONDITION_CONVECTION_NATURAL,elementGroup);
 
     // Thermal conductivity
     cPos = bc.findComponentPosition(R_VARIABLE_THERMAL_CONDUCTIVITY);
@@ -1049,6 +1363,7 @@ bool RSolverHeat::getNaturalConvection(const RElementGroup &elementGroup, uint e
                      RBoundaryCondition::getName(R_BOUNDARY_CONDITION_CONVECTION_NATURAL).toUtf8().constData());
     }
     double k = bc.getComponent(cPos).get(this->pModel->getTimeSolver().getCurrentTime());
+    this->checkConvectionInput(k,R_VARIABLE_THERMAL_CONDUCTIVITY,R_BOUNDARY_CONDITION_CONVECTION_NATURAL,elementGroup);
 
     // Thermal expansion coefficient
     cPos = bc.findComponentPosition(R_VARIABLE_THERMAL_EXPANSION_COEFFICIENT);
