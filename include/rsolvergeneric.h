@@ -66,6 +66,9 @@ class RSolverGeneric
         bool firstRun;
         //! Task iteration counter.
         uint taskIteration;
+        //! Convergence value of the task group driving this solver.
+        //! Zero or less means the group runs all of its iterations.
+        double taskCvgValue;
         //! Computable elements array.
         RBVector computableElements;
         //! Includable elements array (not included in coefficient matrix).
@@ -88,7 +91,7 @@ class RSolverGeneric
         virtual ~RSolverGeneric();
 
         //! Run solver.
-        void run(bool firstExecution, uint taskIteration);
+        void run(bool firstExecution, uint taskIteration, double taskCvgValue = 0.0);
 
         //! Get mesh changed.
         bool getMeshChanged() const;

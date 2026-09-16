@@ -21,6 +21,7 @@ RSolverGeneric::RSolverGeneric(RModel *pModel, const QString &modelFileName, con
     , pSharedData(&sharedData)
     , firstRun(false)
     , taskIteration(0)
+    , taskCvgValue(0.0)
     , computableElements(this->pModel->getNElements(),false)
 {
     this->elementTemperature = this->pSharedData->findData("element-temperature");
@@ -33,10 +34,11 @@ RSolverGeneric::~RSolverGeneric()
 
 }
 
-void RSolverGeneric::run(bool firstExecution, uint taskIteration)
+void RSolverGeneric::run(bool firstExecution, uint taskIteration, double taskCvgValue)
 {
     this->firstRun = firstExecution && !this->pModel->getProblemSetup().getRestart();
     this->taskIteration = taskIteration;
+    this->taskCvgValue = taskCvgValue;
 
     this->elementTemperature.resize(this->pModel->getNElements(),RVariable::getInitValue(R_VARIABLE_TEMPERATURE));
 

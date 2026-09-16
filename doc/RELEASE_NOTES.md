@@ -1,3 +1,180 @@
+## Version 1.3.1
+
+### Improvements
+
+#### Fluid solver convergence
+
+- **RSolverFluid** reports convergence, which it never did before. A task group
+  holding a flow task used to run its full iteration count every time, since
+  `hasConverged()` always answered no, and choosing the count was left entirely
+  to the user
+- The criterion has two parts, and both have to hold. The first is the
+  **relative size of the Newton increment** - the iteration has settled once the
+  step the field takes is negligible against the field itself. It is reported as
+  `Convergence-V` and `Convergence-P` and compared against the convergence value
+  of the task group driving the solver
+- The second is that the **residual has come down**: it has to have fallen to a
+  tenth of what it was at the first pass of the same solve, each time step
+  counting as a solve of its own. A nearly singular system - a model with no
+  pressure reference, or a mesh which can not carry the Reynolds number asked of
+  it - takes tiny steps because it can not move rather than because it has
+  arrived, and its residual stays where it was or climbs. Without this part such
+  a run reports convergence on its second pass and returns a field which is not
+  a solution. The ratio and its target are printed in the log
+- The residual part is a fixed tenth rather than a second setting, so a loose
+  convergence value cannot disable the check it exists to perform. A slowly
+  converging model may never satisfy it and then runs its full iteration count,
+  which is the behaviour of earlier versions
+- Those two quantities are now computed as `||dv|| / ||v||` and `||dp|| / ||p||`
+  rather than as the signed difference of the field norms before and after the
+  update. A difference of norms is not a measure of change - two entirely
+  different fields can share a norm - and it was neither positive nor
+  dimensionless, so nothing could be compared against it. The convergence graph
+  of a flow run therefore looks different, and now falls monotonically as the
+  run settles
+- Both norms are taken inside the downscaling bracket, so the ratio is
+  dimensionless and no longer needs a scale factor. The pass over the nodes which
+  computed the old field norms is gone
+- The solver takes at least two passes before reporting convergence, so a field
+  which has not moved yet - a model with no inflow, or the very first assembly -
+  is not mistaken for a converged one
+- The log prints the convergence target of the group and marks the iteration
+  which reached it
+- **RSolverGeneric::run()** takes the convergence value of the task group as a
+  third argument and **RSolver::runProblemTask()** passes it down, so a solver
+  can compare its own convergence against what the group asks for
+
+#### Jacobian verification
+
+- **RSolverFluid::verifyJacobian()** compares the assembled matrix against a
+  finite difference of the residual and reports where the two disagree. The
+  iteration solves `A*dx = b` and applies `x += dx`, so it drives `b(x)` to zero
+  and the exact Newton matrix is `-db/dx`. Each unknown is perturbed in turn,
+  the system reassembled either side of it, and the resulting column compared
+  with the assembled one
+- The report gives the ratio of the assembled entry to the measured one per
+  block of the system - velocity/velocity, velocity/pressure, pressure/velocity,
+  pressure/pressure - as minimum, median and maximum, together with the single
+  largest disagreement and the node and component it sits on. A block whose
+  ratio is one throughout is assembled correctly; a block whose ratio is some
+  other number throughout carries that factor too many
+- The stabilisation parameters and the element length are held at their
+  unperturbed values for the duration of the sweep. They follow the velocity but
+  the matrix carries no derivative of them, so letting them move would put an
+  expected disagreement into every term they touch and hide the one being looked
+  for. The pass counter and the mesh-changed flag are held as well, so that
+  reassembling does not rebuild the field from the boundary conditions or resize
+  the system in the middle of the sweep
+- The report groups the ratios within a block, so a block made of several terms
+  can be told apart: a group at `1` and a group at something else names a factor
+  and says how many entries carry it
+- The central difference step is sized at about the cube root of the machine
+  epsilon. At `1.0e-7` the pressure block of a model at rest read 2.5 per cent
+  out - the residual there is dominated by terms the perturbation does not reach,
+  and the difference lost the signal to cancellation. That reading was the check
+  and not the solver
+- The check refreshes the nodal acceleration for every perturbed assembly. The
+  acceleration is a function of the velocity being perturbed, but `prepare()` does
+  not recompute it - `solve()` does, as part of the update - so without this the
+  difference misses the whole time-derivative term and every transient reading is
+  wrong
+- It is asked for with `--verify-jacobian` on the solver command line, runs once,
+  and reassembles the whole system twice per unknown - so it belongs on a mesh of
+  a few elements and nowhere else
+
+#### What the verification found - diagnosed, not applied
+
+Four terms of the fluid matrix are demonstrably not the derivative of the
+residual it is solved against. Every one of the corrections below was written,
+confirmed with the check, and measured on a reference model. **None of them is
+applied.** Each one makes the iteration worse in practice, and they are recorded
+here with their evidence so that the next attempt starts from it.
+
+- **Viscous coefficient.** The matrix carries `ro * u` where the residual, and
+  the momentum equation, carry `u` alone. On a steady model at rest - where the
+  viscous term is all the velocity/velocity block holds - the check reports that
+  block at a median of exactly `1e+06`, the density in the units the solver works
+  in, while every other block reports `1`. For water the matrix is a million
+  times too stiff in the viscous directions, which is why a steady-state model
+  crawls
+- **Mass terms.** The matrix carries a consistent mass, `ro*iNiN`, and a
+  consistent SUPG mass, while the residual weights the nodal acceleration of one
+  node alone - `mvScale*ax[m]` and `ctvScale*ax[m]`, a lumped mass. The matrix
+  therefore holds off-diagonal terms the residual has no counterpart for
+- **PSPG acceleration term.** The same mistake a third time, in `bteScale`
+- **Theta weighting.** The matrix scales the spatial terms by `alpha*dt` while
+  the residual scales them by `dt`, so under the central difference march - which
+  is `RTimeSolver`'s default - the check reports the velocity/velocity block at
+  `0.5`
+- The general path has a defect of its own: its mass is written as
+  `me[m][m] = ro*N[m]*N[n]` inside the `n` loop, so the last `n` wins and the
+  value is neither consistent nor lumped. Hexahedral transient models assemble a
+  meaningless mass matrix; tetrahedral ones take the other path and are
+  unaffected
+
+With the first four corrected the check reports every block of a steady and a
+transient model at `1`, bar the scatter of the convective linearisation. The
+iteration, however, gets worse rather than better:
+
+| configuration | steady-state | reference transient step, 10 passes |
+|---|---|---|
+| **as shipped** | monotone, no rise in 498 passes | `3.03` |
+| viscous and mass corrected | **oscillates - 119 rises in 258 passes**, residual up 75 per cent on the second pass | `0.557` |
+| plus the theta correction | - | `1.96` |
+| plus the PSPG mass correction | - | `155`, climbing |
+
+The transient case improves and the steady case falls apart. Corrected, the
+Jacobian is far softer, the first Newton step overshoots by three quarters, and
+the iteration spends its life in an overshoot-retreat cycle. A trend-following
+relaxation cannot hold it: growing more slowly (`1.05`, `1.02`) made it worse
+still, and a backtracking line search which takes a bad step back rather than
+living with it smoothed the trajectory but cost more passes than it saved.
+
+**What this says about the solver is worth more than the corrections would have
+been: a more exact Jacobian is not automatically a better iteration matrix here.**
+The system is convection dominated and its true Jacobian is indefinite, so the
+terms which do not belong have been acting as stabilisation. Applying the
+corrections needs a globalisation strong enough to cope with the honest Jacobian -
+a line search on the residual, cheap enough to try several step lengths within
+one pass, which the present structure cannot do because the residual is only
+available from a full `prepare()`.
+
+A note on what the check itself got wrong along the way: a pressure/pressure
+reading of `1.025` was the difference and not the matrix - at a step of `1.0e-7`
+the residual there is dominated by terms the perturbation does not reach and the
+signal was lost to cancellation. The step is now sized at about the cube root of
+the machine epsilon and that block reads `1`.
+
+#### Fluid solver iteration
+
+- **RSolverFluid** damps its step. The matrix it solves is not the exact
+  derivative of the residual it drives to zero, so a full Newton step can
+  overshoot and leave the field further from a solution than it started. The
+  solver now applies `x += omega * dx`, halving `omega` down to a floor of `0.1`
+  after a pass which raised the residual and growing it back by a quarter at a
+  time after a pass which lowered it. `omega` starts at `1` and is reset to `1`
+  at the start of each solve, so a run which never overshoots behaves exactly as
+  before. The value in force is logged as `Relaxation`
+- Only a rise of more than two per cent counts as an overshoot. The residual of a
+  stabilised flow model wanders a little from pass to pass even while it is
+  converging, and retreating on every one of those stalls the iteration at a step
+  too short to make progress - measured, with the floor lowered to `0.01` and no
+  tolerance, as a run which settled at a residual ratio of `0.48` where it
+  reached `0.17` with one
+- The residual of a pass is computed once, at the start of the pass in
+  `updateResidualAndRelaxation()`, and reused by the convergence test and the
+  statistics rather than being assembled twice
+- Measured on the reference transient model, the step which used to climb
+  `2.79`, `3.05`, `3.07` across its first three passes now retreats to
+  `omega = 0.5` on the second and descends from there to `2.48` by the tenth,
+  against `3.07` before
+- The stabilisation parameters `Tsupg`, `Tlsic` and the element length along the
+  flow are evaluated at the field being solved rather than at the velocity of
+  the previous time step. The two are the same in a steady-state run; in a
+  transient one the old field is the velocity the step started from, held fixed
+  across every pass of that step, so the stabilisation lagged behind the flow it
+  was meant to stabilise
+
 ## Version 1.2.0
 
 ### Improvements

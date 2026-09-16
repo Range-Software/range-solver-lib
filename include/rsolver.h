@@ -53,7 +53,7 @@ class RSolver
 
         //! Run single solver for given problem task.
         //! Return task convergence status (true = converged).
-        bool runProblemTask(const RProblemTaskItem &problemTaskItem, uint taskIteration);
+        bool runProblemTask(const RProblemTaskItem &problemTaskItem, uint taskIteration, double cvgValue);
 
 };
 

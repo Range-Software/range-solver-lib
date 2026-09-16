@@ -159,10 +159,11 @@ void RSolver::run()
 
 void RSolver::runSingle()
 {
-    this->runProblemTask(this->pModel->getProblemTaskTree(),0);
+    const RProblemTaskItem &taskTree = this->pModel->getProblemTaskTree();
+    this->runProblemTask(taskTree,0,taskTree.getCvgValue());
 }
 
-bool RSolver::runProblemTask(const RProblemTaskItem &problemTaskItem, uint taskIteration)
+bool RSolver::runProblemTask(const RProblemTaskItem &problemTaskItem, uint taskIteration, double cvgValue)
 {
     bool converged = false;
 
@@ -175,7 +176,7 @@ bool RSolver::runProblemTask(const RProblemTaskItem &problemTaskItem, uint taskI
             RLogger::indent();
             for (uint j=0;j<problemTaskItem.getNChildren();j++)
             {
-                if (this->runProblemTask(problemTaskItem.getChild(j),i))
+                if (this->runProblemTask(problemTaskItem.getChild(j),i,problemTaskItem.getCvgValue()))
                 {
                     nConverged++;
                 }
@@ -213,7 +214,7 @@ bool RSolver::runProblemTask(const RProblemTaskItem &problemTaskItem, uint taskI
             RLogger::info("Solving problem task: %s\n",RProblem::getName(problemTaskItem.getProblemType()).toUtf8().constData());
             RLogger::indent();
 
-            this->solvers[problemType]->run(firstExecution,taskIteration);
+            this->solvers[problemType]->run(firstExecution,taskIteration,cvgValue);
             converged = this->solvers[problemTaskItem.getProblemType()]->hasConverged();
             if (this->solvers[problemTaskItem.getProblemType()]->getMeshChanged())
             {

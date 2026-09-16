@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <omp.h>
 
@@ -185,6 +186,20 @@ class FluidMatrixContainer
         }
 };
 
+bool RSolverFluid::verifyJacobianRequested = false;
+
+const double RSolverFluid::residualDropRatio = 0.1;
+// Step of the central difference used by verifyJacobian(). Around the cube root
+// of the machine epsilon, which balances the truncation of the difference
+// against the cancellation in it. At 1.0e-7 the pressure block of a model at
+// rest read 2.5 per cent out, which was the difference and not the matrix.
+const double RSolverFluid::differenceStep = 1.0e-5;
+
+const double RSolverFluid::minRelaxation = 0.1;
+const double RSolverFluid::relaxationCutFactor = 0.5;
+const double RSolverFluid::relaxationGrowFactor = 1.25;
+const double RSolverFluid::relaxationRiseTolerance = 0.02;
+
 RSolverFluid::RSolverFluid(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
     , streamVelocity(1.0)
@@ -193,6 +208,12 @@ RSolverFluid::RSolverFluid(RModel *pModel, const QString &modelFileName, const Q
     , cvgP(0.0)
     , statsCounter(0)
     , statsOldResidual(0.0)
+    , residual(0.0)
+    , residualFirst(0.0)
+    , previousResidual(0.0)
+    , relaxation(1.0)
+    , jacobianVerified(false)
+    , freezeStabilization(false)
     , xInitialized(false)
 {
     this->problemType = R_PROBLEM_FLUID;
@@ -215,7 +236,36 @@ RSolverFluid::~RSolverFluid()
 
 bool RSolverFluid::hasConverged() const
 {
-    return false;
+    // A task group with no convergence value runs all of its iterations.
+    if (this->taskCvgValue <= 0.0)
+    {
+        return false;
+    }
+
+    // Always take a second pass, so that a field which has not moved yet - a
+    // model with no inflow, or the very first assembly - is not mistaken for a
+    // converged one.
+    if (this->taskIteration < 1)
+    {
+        return false;
+    }
+
+    if (this->cvgV >= this->taskCvgValue || this->cvgP >= this->taskCvgValue)
+    {
+        return false;
+    }
+
+    // A small increment on its own is not a solution. A nearly singular system -
+    // a model with no pressure reference, or a mesh which can not carry the
+    // Reynolds number asked of it - takes tiny steps while its residual stays
+    // where it was, or climbs. The residual has to have come down as well.
+    if (this->residualFirst > RConstants::eps)
+    {
+        return (this->residual <= this->residualFirst * RSolverFluid::residualDropRatio);
+    }
+
+    // The solve started at a residual of zero - it can only stay there.
+    return (this->residual <= RConstants::eps);
 }
 
 void RSolverFluid::initialize()
@@ -511,6 +561,17 @@ void RSolverFluid::solve()
     RLogger::info("Solving matrix system\n");
     RLogger::indent();
 
+    if (RSolverFluid::verifyJacobianRequested && !this->jacobianVerified)
+    {
+        this->jacobianVerified = true;
+        this->verifyJacobian();
+    }
+
+    // The residual assembled by prepare() belongs to the field as it stands
+    // now, before this pass moves it, and decides how much of this pass's step
+    // is worth taking.
+    this->updateResidualAndRelaxation();
+
     this->solverStopWatch.reset();
     this->solverStopWatch.resume();
 
@@ -540,19 +601,6 @@ void RSolverFluid::solve()
     this->updateStopWatch.reset();
     this->updateStopWatch.resume();
 
-    // Compute old velocity norm (parallelized reduction)
-    double uOld = 0.0;
-    #pragma omp parallel for default(shared) reduction(+:uOld)
-    for (int64_t i=0;i<int64_t(this->nodeVelocity.x.size());i++)
-    {
-        double vx = this->nodeVelocity.x[uint(i)];
-        double vy = this->nodeVelocity.y[uint(i)];
-        double vz = this->nodeVelocity.z[uint(i)];
-        uOld += vx*vx + vy*vy + vz*vz;
-    }
-    uOld = std::sqrt(uOld);
-    double pOld = RRVector::euclideanNorm(this->nodePressure);
-
     if (!this->pModel->getTimeSolver().getEnabled())
     {
         this->nodeVelocityOld.x = this->nodeVelocity.x;
@@ -560,8 +608,14 @@ void RSolverFluid::solve()
         this->nodeVelocityOld.z = this->nodeVelocity.z;
     }
 
-    // Update node velocities and pressures (parallelized)
-    #pragma omp parallel for default(shared)
+    // Update node velocities and pressures (parallelized).
+    // The norm of the increment is accumulated on the way - it is what tells
+    // whether the non-linear iteration has settled.
+    double dvNorm2 = 0.0;
+    double dpNorm2 = 0.0;
+    const double omega = this->relaxation;
+
+    #pragma omp parallel for default(shared) reduction(+:dvNorm2,dpNorm2)
     for (int64_t i=0;i<int64_t(this->pModel->getNNodes());i++)
     {
         uint nodeIdx = uint(i);
@@ -595,10 +649,22 @@ void RSolverFluid::solve()
             dvy = v[1];
             dvz = v[2];
         }
+
+        // Only the relaxed share of the computed step is taken, and it is that
+        // share - what the field actually moved by - which the convergence
+        // measure below is built from.
+        dvx *= omega;
+        dvy *= omega;
+        dvz *= omega;
+        dp  *= omega;
+
         this->nodeVelocity.x[nodeIdx] += dvx;
         this->nodeVelocity.y[nodeIdx] += dvy;
         this->nodeVelocity.z[nodeIdx] += dvz;
         this->nodePressure[nodeIdx] += dp;
+
+        dvNorm2 += dvx*dvx + dvy*dvy + dvz*dvz;
+        dpNorm2 += dp*dp;
     }
     if (this->pModel->getTimeSolver().getEnabled())
     {
@@ -627,8 +693,12 @@ void RSolverFluid::solve()
     u = std::sqrt(u);
     double p = RRVector::euclideanNorm(this->nodePressure);
 
-    this->cvgV = (u - uOld) / this->scales.findScaleFactor(R_VARIABLE_VELOCITY);
-    this->cvgP = (p - pOld) / this->scales.findScaleFactor(R_VARIABLE_PRESSURE);
+    // Relative size of the Newton increment. The field has settled once the
+    // step it takes is negligible against the field itself. Both norms are in
+    // the same (downscaled) units, so the ratio is dimensionless and needs no
+    // scale factor of its own.
+    this->cvgV = std::sqrt(dvNorm2) / std::max(u,RConstants::eps);
+    this->cvgP = std::sqrt(dpNorm2) / std::max(p,RConstants::eps);
 
     this->updateStopWatch.pause();
 
@@ -743,9 +813,9 @@ void RSolverFluid::store()
 
 void RSolverFluid::statistics()
 {
-    double secondScale = this->scales.getSecond();
-    double scale = (secondScale * secondScale) / this->scales.getKilogram();
-    double residual = RRVector::euclideanNorm(this->b)*scale;
+    // The residual itself was computed at the start of this pass, before the
+    // increment was applied - see updateResidualAndRelaxation().
+    const double residual = this->residual;
     double convergence = residual - this->statsOldResidual;
     this->statsOldResidual = residual;
 
@@ -765,6 +835,16 @@ void RSolverFluid::statistics()
     RLogger::info("Convergence-R: % -13g\n",convergence);
     RLogger::info("Convergence-V: % -13g\n",this->cvgV);
     RLogger::info("Convergence-P: % -13g\n",this->cvgP);
+    if (this->taskCvgValue > 0.0)
+    {
+        RLogger::info("Relaxation:    % -13g\n",this->relaxation);
+        RLogger::info("Residual ratio:% -13g (target %g)\n",
+                      (this->residualFirst > RConstants::eps) ? this->residual / this->residualFirst : 0.0,
+                      RSolverFluid::residualDropRatio);
+        RLogger::info("Convergence target: % -13g%s\n",
+                      this->taskCvgValue,
+                      this->hasConverged() ? " (reached)" : "");
+    }
 
     RLogger::info("Build time:        %9u [ms]\n",this->buildStopWatch.getMiliSeconds());
     RLogger::info("Solver time:       %9u [ms]\n",this->solverStopWatch.getMiliSeconds());
@@ -1389,14 +1469,6 @@ void RSolverFluid::computeElementGeneral(unsigned int elementID, RRMatrix &Ae, R
     RR3Vector ve(this->elementVelocity.x[elementID],
                  this->elementVelocity.y[elementID],
                  this->elementVelocity.z[elementID]);
-    RR3Vector veo(0.0,0.0,0.0);
-    for (uint i=0;i<nen;i++)
-    {
-        veo[0] += this->nodeVelocityOld.x[element.getNodeId(i)];
-        veo[1] += this->nodeVelocityOld.y[element.getNodeId(i)];
-        veo[2] += this->nodeVelocityOld.z[element.getNodeId(i)];
-    }
-    veo *= 1.0/double(nen);
     // Reuse thread-local vectors from matrixContainer
     RRVector &ax = matrixCotainer.ax;
     RRVector &ay = matrixCotainer.ay;
@@ -1411,12 +1483,30 @@ void RSolverFluid::computeElementGeneral(unsigned int elementID, RRMatrix &Ae, R
                 this->elementGravity.y[elementID],
                 this->elementGravity.z[elementID]);
     double p = this->elementPressure[elementID];
-    // element level velocity magnitude
-    double mvh = veo.length();
+    // Element level velocity magnitude and direction, which set the
+    // stabilisation parameters and the element length below. Both follow the
+    // field being solved. They used to be taken from the velocity of the
+    // previous time step, which is the same thing in a steady-state run but in a
+    // transient one is the field the step started from, held fixed across every
+    // pass of that step - so the stabilisation lagged behind the flow it was
+    // meant to stabilise.
+    // While the Jacobian check perturbs the field they are held where they
+    // were, so that the difference it measures covers only the terms the
+    // assembled matrix actually carries - see verifyJacobian().
+    double mvh;
+    RR3Vector s;
+    if (this->freezeStabilization)
+    {
+        mvh = this->frozenMvh[elementID];
+        s = this->frozenS[elementID];
+    }
+    else
+    {
+        mvh = ve.length();
+        s = ve;
+        s.normalize();
+    }
     double invmvh = 1.0 / mvh;
-    // element level velocity direction
-    RR3Vector s(veo);
-    s.normalize();
 
     // Reuse thread-local vdiv vector
     RRVector &vdiv = matrixCotainer.vdiv;
@@ -1872,14 +1962,6 @@ void RSolverFluid::computeElementConstantDerivative(unsigned int elementID, RRMa
     RR3Vector ve(this->elementVelocity.x[elementID],
                  this->elementVelocity.y[elementID],
                  this->elementVelocity.z[elementID]);
-    RR3Vector veo(0.0,0.0,0.0);
-    for (uint i=0;i<nen;i++)
-    {
-        veo[0] += this->nodeVelocityOld.x[element.getNodeId(i)];
-        veo[1] += this->nodeVelocityOld.y[element.getNodeId(i)];
-        veo[2] += this->nodeVelocityOld.z[element.getNodeId(i)];
-    }
-    veo *= 1.0/double(nen);
     // Reuse thread-local vectors from matrixContainer
     RRVector &ax = matrixCotainer.ax;
     RRVector &ay = matrixCotainer.ay;
@@ -1895,12 +1977,30 @@ void RSolverFluid::computeElementConstantDerivative(unsigned int elementID, RRMa
                 this->elementGravity.y[elementID],
                 this->elementGravity.z[elementID]);
     double p = this->elementPressure[elementID];
-    // element level velocity magnitude
-    double mvh = veo.length();
+    // Element level velocity magnitude and direction, which set the
+    // stabilisation parameters and the element length below. Both follow the
+    // field being solved. They used to be taken from the velocity of the
+    // previous time step, which is the same thing in a steady-state run but in a
+    // transient one is the field the step started from, held fixed across every
+    // pass of that step - so the stabilisation lagged behind the flow it was
+    // meant to stabilise.
+    // While the Jacobian check perturbs the field they are held where they
+    // were, so that the difference it measures covers only the terms the
+    // assembled matrix actually carries - see verifyJacobian().
+    double mvh;
+    RR3Vector s;
+    if (this->freezeStabilization)
+    {
+        mvh = this->frozenMvh[elementID];
+        s = this->frozenS[elementID];
+    }
+    else
+    {
+        mvh = ve.length();
+        s = ve;
+        s.normalize();
+    }
     double invmvh = 1.0 / mvh;
-    // element level velocity direction
-    RR3Vector s(veo);
-    s.normalize();
 
     const RRVector &iN = RElement::getMassVector(element.getType());
     const RRMatrix &iNiN = RElement::getMassMatrix(element.getType());
@@ -2202,6 +2302,279 @@ void RSolverFluid::computeElementConstantDerivative(unsigned int elementID, RRMa
     double detJ = this->shapeDerivations[elementID]->getJacobian(0);
     Ae *= detJ;
     be *= detJ;
+}
+
+void RSolverFluid::setVerifyJacobian(bool verifyJacobian)
+{
+    RSolverFluid::verifyJacobianRequested = verifyJacobian;
+}
+
+void RSolverFluid::updateNodeAcceleration()
+{
+    if (!this->pModel->getTimeSolver().getEnabled())
+    {
+        return;
+    }
+
+    const double invDt = 1.0 / this->pModel->getTimeSolver().getCurrentTimeStepSize();
+
+    for (uint i=0;i<this->pModel->getNNodes();i++)
+    {
+        this->nodeAcceleration.x[i] = (this->nodeVelocity.x[i] - this->nodeVelocityOld.x[i]) * invDt;
+        this->nodeAcceleration.y[i] = (this->nodeVelocity.y[i] - this->nodeVelocityOld.y[i]) * invDt;
+        this->nodeAcceleration.z[i] = (this->nodeVelocity.z[i] - this->nodeVelocityOld.z[i]) * invDt;
+    }
+}
+
+void RSolverFluid::verifyJacobian()
+{
+    const uint nEnabled = this->nodeBook.getNEnabled();
+    const uint nNodes = this->pModel->getNNodes();
+    const uint nElements = this->pModel->getNElements();
+
+    // Every reassembly below has to see the field as this routine leaves it.
+    // On the first pass of a solve, and whenever the mesh has just changed,
+    // prepare() rebuilds the field from the boundary conditions and the node
+    // book along with it, which would wipe out each perturbation and could even
+    // change the size of the system in the middle of the sweep. Both are held
+    // for the duration - neither the mesh nor the conditions move here.
+    const uint taskIterationBackup = this->taskIteration;
+    const bool meshChangedBackup = this->meshChanged;
+    this->taskIteration = std::max(this->taskIteration,uint(1));
+    this->meshChanged = false;
+
+    RLogger::info("Verifying the Jacobian against a finite difference of the residual\n");
+    RLogger::indent();
+    RLogger::info("Unknowns:      %u\n",nEnabled);
+    RLogger::info("Assemblies:    %u\n",2*nEnabled);
+    if (nElements > 0)
+    {
+        RLogger::info("Density:       %g\n",this->elementDensity[0]);
+        RLogger::info("Viscosity:     %g\n",this->elementViscosity[0]);
+        RLogger::info("Density*visc.: %g\n",this->elementDensity[0]*this->elementViscosity[0]);
+    }
+
+    // Map every enabled row of the matrix back to the node and the component
+    // it stands for - 0,1,2 are the velocity components, 3 is the pressure.
+    std::vector<uint> dofNode(nEnabled,0);
+    std::vector<uint> dofComponent(nEnabled,0);
+    for (uint i=0;i<nNodes;i++)
+    {
+        for (uint c=0;c<4;c++)
+        {
+            uint position = 0;
+            if (this->nodeBook.getValue(4*i+c,position))
+            {
+                dofNode[position] = i;
+                dofComponent[position] = c;
+            }
+        }
+    }
+
+    // The system as it was assembled from the unperturbed field.
+    const RSparseMatrix Aref(this->A);
+    const RRVector bRef(this->b);
+
+    // Hold the stabilisation parameters at the values they have for that same
+    // field. They follow the velocity, but the matrix carries no derivative of
+    // them, so letting them move would put an expected disagreement into every
+    // term they touch and drown the one being looked for.
+    this->frozenMvh.resize(nElements,0.0);
+    this->frozenS.resize(nElements,RR3Vector(0.0,0.0,0.0));
+    for (uint i=0;i<nElements;i++)
+    {
+        RR3Vector ve(this->elementVelocity.x[i],this->elementVelocity.y[i],this->elementVelocity.z[i]);
+        this->frozenMvh[i] = ve.length();
+        ve.normalize();
+        this->frozenS[i] = ve;
+    }
+    this->freezeStabilization = true;
+
+    // Ratios of the assembled entry to the measured one, kept per block of the
+    // system so that a factor sitting on one block shows up as a factor.
+    const uint nBlocks = 4;
+    const QString blockName[nBlocks] = { "velocity / velocity",
+                                         "velocity / pressure",
+                                         "pressure / velocity",
+                                         "pressure / pressure" };
+    std::vector<std::vector<double>> blockRatios(nBlocks);
+
+    double worstDifference = 0.0;
+    uint worstRow = 0;
+    uint worstColumn = 0;
+    double worstAssembled = 0.0;
+    double worstMeasured = 0.0;
+
+    RRVector bPlus;
+    RRVector bMinus;
+
+    for (uint j=0;j<nEnabled;j++)
+    {
+        const uint node = dofNode[j];
+        const uint component = dofComponent[j];
+
+        double *field = nullptr;
+        switch (component)
+        {
+            case 0:  field = &this->nodeVelocity.x[node]; break;
+            case 1:  field = &this->nodeVelocity.y[node]; break;
+            case 2:  field = &this->nodeVelocity.z[node]; break;
+            default: field = &this->nodePressure[node];   break;
+        }
+
+        const double value = *field;
+        const double step = RSolverFluid::differenceStep * std::max(std::fabs(value),1.0);
+
+        *field = value + step;
+        this->updateNodeAcceleration();
+        this->prepare();
+        bPlus = this->b;
+
+        *field = value - step;
+        this->updateNodeAcceleration();
+        this->prepare();
+        bMinus = this->b;
+
+        *field = value;
+        this->updateNodeAcceleration();
+
+        for (uint i=0;i<nEnabled;i++)
+        {
+            // The iteration solves A*dx = b and applies x += dx, so it drives
+            // b(x) to zero and the exact Newton matrix is -db/dx.
+            const double measured = -(bPlus[i] - bMinus[i]) / (2.0 * step);
+            const double assembled = Aref.findValue(i,j);
+
+            const double scale = std::max(std::fabs(measured),std::fabs(assembled));
+            if (scale < RConstants::eps)
+            {
+                continue;
+            }
+
+            const double difference = std::fabs(assembled - measured) / scale;
+            if (difference > worstDifference)
+            {
+                worstDifference = difference;
+                worstRow = i;
+                worstColumn = j;
+                worstAssembled = assembled;
+                worstMeasured = measured;
+            }
+
+            if (std::fabs(measured) < RConstants::eps)
+            {
+                continue;
+            }
+
+            const uint block = (dofComponent[i] < 3 ? 0 : 2) + (component < 3 ? 0 : 1);
+            blockRatios[block].push_back(assembled / measured);
+        }
+    }
+
+    this->freezeStabilization = false;
+    this->taskIteration = taskIterationBackup;
+    this->meshChanged = meshChangedBackup;
+    this->A = Aref;
+    this->b = bRef;
+
+    RLogger::info("Ratio of the assembled entry to the measured one, by block:\n");
+    RLogger::indent();
+    for (uint i=0;i<nBlocks;i++)
+    {
+        std::vector<double> &ratios = blockRatios[i];
+        if (ratios.empty())
+        {
+            RLogger::info("%-20s no entries\n",blockName[i].toUtf8().constData());
+            continue;
+        }
+        std::sort(ratios.begin(),ratios.end());
+        RLogger::info("%-20s entries %6u | min % -12g | median % -12g | max % -12g\n",
+                      blockName[i].toUtf8().constData(),
+                      uint(ratios.size()),
+                      ratios.front(),
+                      ratios[ratios.size()/2],
+                      ratios.back());
+
+        // Entries which agree sit on one value, so grouping what is within the
+        // noise of the difference tells the terms of the block apart: one group
+        // at 1 and one at something else names a factor and says how much of
+        // the block carries it.
+        std::vector<double> groupValue;
+        std::vector<uint> groupCount;
+        for (uint j=0;j<ratios.size();j++)
+        {
+            if (!groupValue.empty() &&
+                std::fabs(ratios[j] - groupValue.back()) <= 0.02 * std::max(std::fabs(groupValue.back()),1.0e-3))
+            {
+                groupCount.back()++;
+                continue;
+            }
+            groupValue.push_back(ratios[j]);
+            groupCount.push_back(1);
+        }
+
+        RLogger::indent();
+        for (uint j=0;j<groupValue.size() && j<6;j++)
+        {
+            RLogger::info("%6u entries near % -12g\n",groupCount[j],groupValue[j]);
+        }
+        if (groupValue.size() > 6)
+        {
+            RLogger::info("%6u further groups\n",uint(groupValue.size())-6);
+        }
+        RLogger::unindent(false);
+    }
+    RLogger::unindent(false);
+
+    RLogger::info("Largest relative disagreement: %g\n",worstDifference);
+    RLogger::indent();
+    RLogger::info("row    node %u component %u\n",dofNode[worstRow],dofComponent[worstRow]);
+    RLogger::info("column node %u component %u\n",dofNode[worstColumn],dofComponent[worstColumn]);
+    RLogger::info("assembled % -13g measured % -13g\n",worstAssembled,worstMeasured);
+    RLogger::unindent(false);
+
+    RLogger::info("A block whose ratio is 1 throughout is assembled correctly. A block\n");
+    RLogger::info("whose ratio is the same number other than 1 throughout carries that\n");
+    RLogger::info("factor too many. A scattered ratio means the term is wrong in form.\n");
+
+    RLogger::unindent();
+}
+
+void RSolverFluid::updateResidualAndRelaxation()
+{
+    const double secondScale = this->scales.getSecond();
+    const double scale = (secondScale * secondScale) / this->scales.getKilogram();
+
+    this->previousResidual = this->residual;
+    this->residual = RRVector::euclideanNorm(this->b) * scale;
+
+    if (this->taskIteration == 0)
+    {
+        // Each solve - each time step of a transient run - starts its own
+        // history and takes the full step until told otherwise.
+        this->residualFirst = this->residual;
+        this->previousResidual = this->residual;
+        this->relaxation = 1.0;
+        return;
+    }
+
+    // The residual of this pass judges the step the previous pass took: the
+    // matrix is not the exact derivative of the residual, so a full step can
+    // overshoot and leave the field further from a solution than it started.
+    // Retreat quickly when that happens and return to the full step slowly.
+    // Only a rise worth reacting to counts. The residual of a stabilised flow
+    // model wanders a little from pass to pass even while it is converging, and
+    // retreating on every one of those stalls the iteration at a step too short
+    // to make any progress.
+    if (this->residual > this->previousResidual * (1.0 + RSolverFluid::relaxationRiseTolerance))
+    {
+        this->relaxation = std::max(this->relaxation * RSolverFluid::relaxationCutFactor,
+                                    RSolverFluid::minRelaxation);
+    }
+    else
+    {
+        this->relaxation = std::min(this->relaxation * RSolverFluid::relaxationGrowFactor,1.0);
+    }
 }
 
 double RSolverFluid::findTimeScale() const
