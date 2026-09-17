@@ -11,6 +11,7 @@
 
 const double RSolverGeneric::sigma = 5.670367e-8; // Stefan-Boltzman constant [W/(m*m*K*K*K*K)]
 const double RSolverGeneric::e0 = 8.854187817e-12; // Vacuum permittivity [F/m]
+const double RSolverGeneric::u0 = 1.25663706212e-6; // Vacuum permeability [H/m]
 
 RSolverGeneric::RSolverGeneric(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : meshChanged(true)

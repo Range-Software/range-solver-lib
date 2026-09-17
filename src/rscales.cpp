@@ -140,7 +140,7 @@ double RScales::findScaleFactor(RVariableType variableType) const
         case R_VARIABLE_ITERATION:
             return 1.0;
         case R_VARIABLE_JOULE_HEAT:
-            return this->kilogram*std::pow(this->metre,2)/std::pow(this->second,3);
+            return this->kilogram/(this->metre*std::pow(this->second,3));
         case R_VARIABLE_MAGNETIC_FIELD:
         case R_VARIABLE_MAGNETIC_FIELD_X:
         case R_VARIABLE_MAGNETIC_FIELD_Y:

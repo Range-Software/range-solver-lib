@@ -40,9 +40,12 @@ void RSolverMagnetostatics::recover()
     this->recoverVariable(R_VARIABLE_CURRENT_DENSITY,R_VARIABLE_APPLY_ELEMENT,this->pModel->getNElements(),1,elementCurrentDensityY,0.0);
     this->recoverVariable(R_VARIABLE_CURRENT_DENSITY,R_VARIABLE_APPLY_ELEMENT,this->pModel->getNElements(),2,elementCurrentDensityZ,0.0);
 
-    this->pModel->convertElementToNodeVector(elementCurrentDensityX,RBVector(this->pModel->getNElements(),true),this->nodeCurrentDensity.x,false);
-    this->pModel->convertElementToNodeVector(elementCurrentDensityY,RBVector(this->pModel->getNElements(),true),this->nodeCurrentDensity.y,false);
-    this->pModel->convertElementToNodeVector(elementCurrentDensityZ,RBVector(this->pModel->getNElements(),true),this->nodeCurrentDensity.z,false);
+    // Marking no value as set leaves every element to the distance weighted
+    // average, so a node shared by several elements takes a mean of them
+    // instead of the value of whichever element was written last.
+    this->pModel->convertElementToNodeVector(elementCurrentDensityX,RBVector(this->pModel->getNElements(),false),this->nodeCurrentDensity.x,false);
+    this->pModel->convertElementToNodeVector(elementCurrentDensityY,RBVector(this->pModel->getNElements(),false),this->nodeCurrentDensity.y,false);
+    this->pModel->convertElementToNodeVector(elementCurrentDensityZ,RBVector(this->pModel->getNElements(),false),this->nodeCurrentDensity.z,false);
 }
 
 void RSolverMagnetostatics::prepare()
@@ -118,9 +121,22 @@ void RSolverMagnetostatics::prepare()
                         B[m][2] += (dN[m][0]*J[2][0] + dN[m][1]*J[2][1] + dN[m][2]*J[2][2]);
                     }
 
+                    // Current density interpolated at the integration point.
+                    // The source is INT( grad(N) x J ), so J belongs to the
+                    // point and not to the node whose gradient multiplies it.
+                    double jx = 0.0;
+                    double jy = 0.0;
+                    double jz = 0.0;
+                    for (unsigned n=0;n<element.size();n++)
+                    {
+                        uint nodeID = element.getNodeId(n);
+                        jx += N[n] * this->nodeCurrentDensity.x[nodeID];
+                        jy += N[n] * this->nodeCurrentDensity.y[nodeID];
+                        jz += N[n] * this->nodeCurrentDensity.z[nodeID];
+                    }
+
                     for (unsigned m=0;m<element.size();m++)
                     {
-                        uint nodeID = element.getNodeId(m);
                         for (unsigned n=0;n<element.size();n++)
                         {
                             double KeValue = (B[m][0]*B[n][0] + B[m][1]*B[n][1] + B[m][2]*B[n][2]) * detJ * shapeFunc.getW();
@@ -128,11 +144,13 @@ void RSolverMagnetostatics::prepare()
                             Ke[3*m+1][3*n+1] -= KeValue;
                             Ke[3*m+2][3*n+2] -= KeValue;
                         }
-                        double feValue = N[m] * detJ * shapeFunc.getW() * RSolverGeneric::e0;
+                        // Vacuum permeability - laplace(B) = -u0 * curl(J).
+                        double feValue = detJ * shapeFunc.getW() * RSolverGeneric::u0;
 
-                        double jsx = - B[m][2] * this->nodeCurrentDensity.y[nodeID] + B[m][1] * this->nodeCurrentDensity.z[nodeID];
-                        double jsy =   B[m][2] * this->nodeCurrentDensity.x[nodeID] - B[m][0] * this->nodeCurrentDensity.z[nodeID];
-                        double jsz = - B[m][1] * this->nodeCurrentDensity.x[nodeID] + B[m][0] * this->nodeCurrentDensity.y[nodeID];
+                        // grad(N[m]) x J
+                        double jsx = B[m][1] * jz - B[m][2] * jy;
+                        double jsy = B[m][2] * jx - B[m][0] * jz;
+                        double jsz = B[m][0] * jy - B[m][1] * jx;
 
                         fe[3*m+0] += feValue * jsx;
                         fe[3*m+1] += feValue * jsy;

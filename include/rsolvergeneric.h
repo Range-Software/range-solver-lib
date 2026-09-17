@@ -28,6 +28,8 @@ class RSolverGeneric
 
         //! Vacuum permittivity.
         static const double e0;
+        //! Vacuum permeability.
+        static const double u0;
         //! Stefan–Boltzmann constant.
         static const double sigma;
 

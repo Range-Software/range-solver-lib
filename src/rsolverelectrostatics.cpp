@@ -190,8 +190,10 @@ void RSolverElectrostatics::prepare()
                                      * shapeFunc.getW()
                                      * line.getCrossArea();
                         }
-                        // Force
-                        fe[m] -= elementChargeDensity[elementID] * N[m] * detJ * shapeFunc.getW();
+                        // Force - integrating div(e0*er*grad(V)) = -rho by
+                        // parts leaves the charge source on the right hand
+                        // side with a positive sign, as on point elements.
+                        fe[m] += elementChargeDensity[elementID] * N[m] * detJ * shapeFunc.getW();
                     }
                 }
                 this->assemblyMatrix(elementID,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())]);
@@ -266,8 +268,8 @@ void RSolverElectrostatics::prepare()
                                      * detJ
                                      * shapeFunc.getW();
                         }
-                        // Force
-                        fe[m] -= elementChargeDensity[elementID] * N[m] * detJ * shapeFunc.getW();
+                        // Force - see the line element loop above.
+                        fe[m] += elementChargeDensity[elementID] * N[m] * detJ * shapeFunc.getW();
                     }
                 }
                 this->assemblyMatrix(elementID,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())]);
@@ -347,8 +349,8 @@ void RSolverElectrostatics::prepare()
                                      * detJ
                                      * shapeFunc.getW();
                         }
-                        // Force
-                        fe[m] -= elementChargeDensity[elementID] * N[m] * detJ * shapeFunc.getW();
+                        // Force - see the line element loop above.
+                        fe[m] += elementChargeDensity[elementID] * N[m] * detJ * shapeFunc.getW();
                     }
                 }
                 this->assemblyMatrix(elementID,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())]);
@@ -448,13 +450,16 @@ void RSolverElectrostatics::process()
                     const RElementShapeFunction &shapeFunc = RElement::getShapeFunction(element.getType(),k);
                     const RRMatrix &dN = shapeFunc.getDN();
                     RRMatrix J, Rt;
-                    double detJ = this->pModel->getElement(elementID).findJacobian(this->pModel->getNodes(),k,J,Rt);
+                    // The electric field is a density - the shape function
+                    // derivatives are averaged over the integration points and
+                    // must not be weighted by the Jacobian determinant.
+                    this->pModel->getElement(elementID).findJacobian(this->pModel->getNodes(),k,J,Rt);
 
                     if (line.getCrossArea() != 0.0)
                     {
                         for (uint m=0;m<dN.getNRows();m++)
                         {
-                            B[m] += dN[m][0] * J[0][0] * detJ / double(nInp);
+                            B[m] += dN[m][0] * J[0][0] / double(nInp);
                         }
                     }
                 }
@@ -483,14 +488,13 @@ void RSolverElectrostatics::process()
 
                 double jre = RRVector::euclideanNorm(currentDensity);
 
-                double elementLength = 0.0;
-                element.findLength(this->pModel->getNodes(),elementLength);
-
                 this->elementElectricField[elementID] = electricField;
                 this->elementCurrentDensity[elementID] = currentDensity;
                 this->elementElectricEnergy[elementID] = this->elementRelativePermittivity[elementID] * RSolverGeneric::e0 * dElectricField / 2.0;
                 this->elementElectricResistivity[elementID] = (jre > RConstants::eps ? ere / jre : 0.0);
-                this->elementJouleHeat[elementID] = this->elementElectricConductivity[elementID] * dElectricField * elementLength;
+                // Joule heat is a source density - the heat solver integrates
+                // it over the element, so no element measure may enter here.
+                this->elementJouleHeat[elementID] = this->elementElectricConductivity[elementID] * dElectricField;
             }
         }
     }
@@ -524,14 +528,16 @@ void RSolverElectrostatics::process()
                     const RElementShapeFunction &shapeFunc = RElement::getShapeFunction(element.getType(),k);
                     const RRMatrix &dN = shapeFunc.getDN();
                     RRMatrix J, Rt;
-                    double detJ = this->pModel->getElement(elementID).findJacobian(this->pModel->getNodes(),k,J,Rt);
+                    // The electric field is a density - see the line element
+                    // loop above.
+                    this->pModel->getElement(elementID).findJacobian(this->pModel->getNodes(),k,J,Rt);
 
                     if (surface.getThickness() != 0.0)
                     {
                         for (uint m=0;m<dN.getNRows();m++)
                         {
-                            B[m][0] += (dN[m][0]*J[0][0] + dN[m][1]*J[0][1]) * detJ / double(nInp);
-                            B[m][1] += (dN[m][0]*J[1][0] + dN[m][1]*J[1][1]) * detJ / double(nInp);
+                            B[m][0] += (dN[m][0]*J[0][0] + dN[m][1]*J[0][1]) / double(nInp);
+                            B[m][1] += (dN[m][0]*J[1][0] + dN[m][1]*J[1][1]) / double(nInp);
                         }
                     }
                 }
@@ -543,8 +549,10 @@ void RSolverElectrostatics::process()
                 {
                     uint nodeID = element.getNodeId(k);
 
-                    Ei -= B[k][0] * this->nodeElectricPotential[nodeID] * surface.getThickness();
-                    Ej -= B[k][1] * this->nodeElectricPotential[nodeID] * surface.getThickness();
+                    // The surface thickness belongs to the stiffness, not to
+                    // the recovered field - it must not enter here either.
+                    Ei -= B[k][0] * this->nodeElectricPotential[nodeID];
+                    Ej -= B[k][1] * this->nodeElectricPotential[nodeID];
                 }
 
                 RRMatrix R;
@@ -564,28 +572,13 @@ void RSolverElectrostatics::process()
 
                 double jre = RRVector::euclideanNorm(currentDensity);
 
-                double elementLength = 0.0;
-
-                RRVector s(2,0.0);
-                if (ere > RConstants::eps)
-                {
-                    s[0] = Ei / ere;
-                    s[1] = Ej / ere;
-                }
-                for (uint m=0;m<element.size();m++)
-                {
-                    elementLength += std::fabs(s[0] * B[m][0] + s[1] * B[m][1]);
-                }
-                if (elementLength > RConstants::eps)
-                {
-                    elementLength = 2.0 / elementLength;
-                }
-
                 this->elementElectricField[elementID] = electricField;
                 this->elementCurrentDensity[elementID] = currentDensity;
                 this->elementElectricEnergy[elementID] = this->elementRelativePermittivity[elementID] * RSolverGeneric::e0 * dElectricField / 2.0;
                 this->elementElectricResistivity[elementID] = (jre > RConstants::eps ? ere / jre : 0.0);
-                this->elementJouleHeat[elementID] = this->elementElectricConductivity[elementID] * dElectricField * elementLength;
+                // Joule heat is a source density - see the line element loop
+                // above.
+                this->elementJouleHeat[elementID] = this->elementElectricConductivity[elementID] * dElectricField;
             }
         }
     }
@@ -616,13 +609,15 @@ void RSolverElectrostatics::process()
                 const RElementShapeFunction &shapeFunc = RElement::getShapeFunction(element.getType(),k);
                 const RRMatrix &dN = shapeFunc.getDN();
                 RRMatrix J, Rt;
-                double detJ = this->pModel->getElement(elementID).findJacobian(this->pModel->getNodes(),k,J,Rt);
+                // The electric field is a density - see the line element loop
+                // above.
+                this->pModel->getElement(elementID).findJacobian(this->pModel->getNodes(),k,J,Rt);
 
                 for (uint m=0;m<dN.getNRows();m++)
                 {
-                    B[m][0] += (dN[m][0]*J[0][0] + dN[m][1]*J[0][1] + dN[m][2]*J[0][2]) * detJ / double(nInp);
-                    B[m][1] += (dN[m][0]*J[1][0] + dN[m][1]*J[1][1] + dN[m][2]*J[1][2]) * detJ / double(nInp);
-                    B[m][2] += (dN[m][0]*J[2][0] + dN[m][1]*J[2][1] + dN[m][2]*J[2][2]) * detJ / double(nInp);
+                    B[m][0] += (dN[m][0]*J[0][0] + dN[m][1]*J[0][1] + dN[m][2]*J[0][2]) / double(nInp);
+                    B[m][1] += (dN[m][0]*J[1][0] + dN[m][1]*J[1][1] + dN[m][2]*J[1][2]) / double(nInp);
+                    B[m][2] += (dN[m][0]*J[2][0] + dN[m][1]*J[2][1] + dN[m][2]*J[2][2]) / double(nInp);
                 }
             }
 
@@ -647,29 +642,12 @@ void RSolverElectrostatics::process()
 
             double jre = RRVector::euclideanNorm(currentDensity);
 
-            double elementLength = 0.0;
-
-            RR3Vector s(0.0,0.0,0.0);
-            if (ere > RConstants::eps)
-            {
-                s[0] = electricField[0] / ere;
-                s[1] = electricField[1] / ere;
-                s[2] = electricField[2] / ere;
-            }
-            for (uint m=0;m<element.size();m++)
-            {
-                elementLength += std::fabs(s[0] * B[m][0] + s[1] * B[m][1] + s[2] * B[m][2]);
-            }
-            if (elementLength > RConstants::eps)
-            {
-                elementLength = 2.0 / elementLength;
-            }
-
             this->elementElectricField[elementID] = electricField;
             this->elementCurrentDensity[elementID] = currentDensity;
             this->elementElectricEnergy[elementID] = this->elementRelativePermittivity[elementID] * RSolverGeneric::e0 * dElectricField / 2.0;
             this->elementElectricResistivity[elementID] = (jre > RConstants::eps ? ere / jre : 0.0);
-            this->elementJouleHeat[elementID] = this->elementElectricConductivity[elementID] * dElectricField * elementLength;
+            // Joule heat is a source density - see the line element loop above.
+            this->elementJouleHeat[elementID] = this->elementElectricConductivity[elementID] * dElectricField;
         }
     }
 }

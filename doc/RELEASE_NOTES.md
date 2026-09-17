@@ -175,6 +175,75 @@ the machine epsilon and that block reads `1`.
   across every pass of that step, so the stabilisation lagged behind the flow it
   was meant to stabilise
 
+### Bug fixes
+
+#### Electrostatic result recovery
+
+- **RSolverElectrostatics** recovers the electric field as a density. The shape
+  function derivatives averaged over the integration points in `process()` were
+  weighted by the Jacobian determinant of the element, which `RSolverHeat` had
+  already been corrected not to do, and on a surface the nodal sum was
+  multiplied by the surface thickness as well. Both are measures of the element
+  rather than of the field, so the recovered gradient scaled with the size of
+  the element it was computed in
+- Everything built on that gradient inherited the factor: the electric field,
+  the current density, the electric energy and the Joule heat all changed with
+  mesh refinement instead of converging, and none of their magnitudes was the
+  physical one. The nodal potential comes from the assembly rather than the
+  recovery and was never affected, and the electrical resistivity is `|E|/|J|`,
+  whose two factors cancel
+- The thickness and the cross area remain in the stiffness, where they carry the
+  section of a surface or line entity, and the `getThickness() > 0` and
+  `getCrossArea() > 0` guards still skip an entity which cannot conduct
+
+#### Charge density sign
+
+- The **Charge density** source is assembled with a positive sign on every
+  element type. Integrating `div(e0*er*grad(V)) = -rho` by parts leaves the
+  charge on the right hand side positively, which is what the point element loop
+  did; the line, surface and volume loops subtracted it instead
+- A positive space charge therefore lowered the potential around it on a meshed
+  body, and a point charge behaved the other way round from a volume charge of
+  the same value. A model driven only by prescribed potentials has no source
+  term and was not affected
+
+#### Joule heat
+
+- The Joule heat stored for each element is the dissipation density
+  `sigma*|E|^2` in `W/m^3`. `RSolverHeat` and `RSolverFluidHeat` add the value
+  to their source term and integrate it over the element, so a density is what
+  they expect; the value carried a characteristic element size on top of it -
+  the element length for a line, `2/SUM|s.B|` along the field for a surface or a
+  volume - and the power delivered to a resistive heating chain depended on the
+  mesh
+- The characteristic length computation, and the unit vector along the field it
+  needed, are gone with it
+- The dimensional scale **RScales** carries for the Joule heat follows, from
+  `kg*m^2/s^3` to `kg/(m*s^3)`. Nothing reads it - only the temperature and the
+  particle concentration scale factors are consumed - but the table describes
+  the variable and now describes it correctly
+
+#### Magnetostatic formulation
+
+- **RSolverMagnetostatics** builds its source term with the vacuum permeability.
+  It multiplied by `RSolverGeneric::e0`, the vacuum permittivity, where
+  `laplace(B) = -u0 * curl(J)` calls for `u0` - two different constants of two
+  different dimensions. `RSolverGeneric::u0` is new, `1.25663706212e-6 H/m`,
+  held beside the permittivity the electrostatics solver uses
+- The source is the Galerkin form `INT( grad(N[m]) x J )`. It was assembled as
+  `N[m] * ( grad(N[m]) x J[m] )` - the shape function of a node times its own
+  gradient, with the current density taken at that node rather than interpolated
+  over the element. The shape function factor had no counterpart in the weak form
+  and the current density is now interpolated at the integration point
+- The current density read from the electrostatics result is converted to nodal
+  values as a distance weighted average. Every element was assigned to its nodes
+  in turn instead, in the order volume, surface, line, point, so a shared node
+  kept the value of whichever element was written last. The magnetic source is
+  the curl of this field, so how it is built feeds straight into the answer
+- These three corrections change every magnetostatic result. The problem type
+  remains incomplete: no boundary condition exists for it, so the system has no
+  constraint and the level of the computed field is still arbitrary
+
 ## Version 1.2.0
 
 ### Improvements
