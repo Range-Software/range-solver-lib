@@ -175,6 +175,68 @@ the machine epsilon and that block reads `1`.
   across every pass of that step, so the stabilisation lagged behind the flow it
   was meant to stabilise
 
+#### Magnetostatic solver
+
+- **RSolverMagnetostatics** evaluates the magnetic field with the
+  **Biot-Savart law** instead of solving a field equation for it. It assembled
+  `laplace(B) = -u0 * curl(J)` for the three components of `B` with no boundary
+  condition of any kind, so the matrix had a null space of uniform fields and
+  every model was singular: the solve completed, and the level of the field it
+  returned was set by the iteration rather than by the physics. In free space
+  the field of a current is fixed by the current alone, and the condition that
+  it vanishes far away is part of the Biot-Savart integral, so there is no
+  boundary to close and no system to solve
+- The current density the electro-statics task stores is constant per element,
+  and every element type that carries it is flat-sided, so the integral over an
+  element has a closed form. A tetrahedron is reduced to its four faces by the
+  gradient theorem, and the integral of `1/R` over each face is a logarithm per
+  edge and the solid angle of the face. A triangle of a surface entity is a sheet
+  current `J * thickness` with the same edge logarithms and solid angle, a
+  quadrilateral is split into two triangles, and a two-node line segment is a
+  straight wire carrying `J * cross area`, whose field is the classic closed form
+- Elements far from the field point do not need the closed form. Beyond twice
+  the longest edge of the element a degree-two rule is used - three points on a
+  triangle, four on a tetrahedron - and beyond six times the midpoint rule. The
+  error against the closed form summed over a whole conductor stays below `1e-4`
+  of the peak field at every node
+- The field of a volume current is continuous, and a node on the surface of a
+  conductor gets the surface field. A line or surface entity is a conductor of
+  zero section whose field is singular at the conductor; at a node on one the
+  solver returns a regularised value - a segment contributes nothing to a point
+  on its own line, and the edge logarithm of a sheet is left out at a node on
+  that edge
+- **Surface and line entities carry current.** The old assembly looped over
+  volume entities only
+- **Every node receives a field.** A node of a surface, line or point entity used
+  to be counted among the unknowns and given no matrix entry, leaving a zero
+  diagonal the Jacobi preconditioner carried along unsolved. There are no
+  unknowns now, and a mesh around the conductor that carries no current shows
+  the field in the space around it
+- The current density is used per element as stored. It used to be averaged onto
+  the nodes and interpolated back to the integration points, which smeared it
+  across the edge of the conductor
+- Elements whose current density is below `1e-10` of the largest are skipped, so
+  a poorly conducting region next to a good conductor - air beside copper - does
+  not add a source per element and nothing measurable to the field. When no
+  element carries a current, the log says so and the field is zero
+- The work grows as the number of nodes times the number of current carrying
+  elements. The nodes are processed in parallel blocks of 64, so that each source
+  element is read from memory once per block rather than once per node; on a
+  model of `120 000` tetrahedra and `24 000` nodes that took the evaluation from
+  about 6.4 to 2.2 seconds with midpoint rules alone, and the complete run takes
+  about five seconds on 14 threads
+- The matrix solver setup is not used, and `assemblyMatrix()` is gone. The vacuum
+  permeability `RSolverGeneric::u0` is used as before
+- The field is that of the modelled current only. An electro-static model whose
+  current enters and leaves the body at its electrodes has an open current path,
+  and the field of the leads that would close it is not included
+- Unit tests in `tst_solver_magnetostatics` check the closed forms against
+  high-order Gauss-Legendre quadrature, the continuity of the field at the
+  vertices, edges and faces of a tetrahedron, the jump across a current sheet,
+  the quadrature rules against the closed form over a whole bar, the field of a
+  bar near and far against direct integration and the finite wire formula, a
+  wire and a strip, and an electro-statics task driving a magnetostatics one
+
 ### Bug fixes
 
 #### Electrostatic result recovery
@@ -222,27 +284,6 @@ the machine epsilon and that block reads `1`.
   `kg*m^2/s^3` to `kg/(m*s^3)`. Nothing reads it - only the temperature and the
   particle concentration scale factors are consumed - but the table describes
   the variable and now describes it correctly
-
-#### Magnetostatic formulation
-
-- **RSolverMagnetostatics** builds its source term with the vacuum permeability.
-  It multiplied by `RSolverGeneric::e0`, the vacuum permittivity, where
-  `laplace(B) = -u0 * curl(J)` calls for `u0` - two different constants of two
-  different dimensions. `RSolverGeneric::u0` is new, `1.25663706212e-6 H/m`,
-  held beside the permittivity the electrostatics solver uses
-- The source is the Galerkin form `INT( grad(N[m]) x J )`. It was assembled as
-  `N[m] * ( grad(N[m]) x J[m] )` - the shape function of a node times its own
-  gradient, with the current density taken at that node rather than interpolated
-  over the element. The shape function factor had no counterpart in the weak form
-  and the current density is now interpolated at the integration point
-- The current density read from the electrostatics result is converted to nodal
-  values as a distance weighted average. Every element was assigned to its nodes
-  in turn instead, in the order volume, surface, line, point, so a shared node
-  kept the value of whichever element was written last. The magnetic source is
-  the curl of this field, so how it is built feeds straight into the answer
-- These three corrections change every magnetostatic result. The problem type
-  remains incomplete: no boundary condition exists for it, so the system has no
-  constraint and the level of the computed field is still arbitrary
 
 ## Version 1.2.0
 
