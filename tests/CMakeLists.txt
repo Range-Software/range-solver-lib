@@ -15,6 +15,7 @@ set(range_solver_lib_tests
     tst_solver_acoustic
     tst_solver_stress
     tst_solver_magnetostatics
+    tst_solver_heat_coupling
     tst_eigen_value_solver
 )
 

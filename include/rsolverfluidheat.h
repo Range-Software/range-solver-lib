@@ -41,8 +41,38 @@ class RSolverFluidHeat : public RSolverGeneric
         //! Stream velocity.
         double streamVelocity;
 
-        //! Temperature convergence.
+        //! Temperature convergence - relative size of the last temperature change.
         double cvgT;
+
+        //! Fluid volume element behind every surface element carrying the Forced
+        //! convection condition, or RConstants::eod where there is none.
+        RUVector wallFluidElements;
+        //! Nodes of the walls - surface elements with a fluid element behind them.
+        RBVector wallNodes;
+        //! Solid node temperature recovered from the heat solver.
+        //! Empty when no heat solve has run.
+        RRVector solidNodeTemperature;
+        //! Whether the wall nodes are held at the solid temperature.
+        bool wallCoupled;
+        //! Wall nodes held at the solid temperature in the current pass.
+        RBVector coupledWallNodes;
+        //! Node temperature the current pass started from - the previous time
+        //! level of a transient solve.
+        RRVector nodeTemperatureOld;
+        //! Wall node temperature the last pass held the walls at - the solid
+        //! temperature relaxed. Empty until the first coupled pass.
+        RRVector wallTemperature;
+        //! Difference between the solid temperature and the wall temperature
+        //! of the previous coupled pass. Empty until the second one.
+        RRVector wallResidual;
+        //! Aitken relaxation factor of the wall temperature.
+        double wallRelaxation;
+        //! Wall heat transfer coefficient - the conductance of the first fluid
+        //! element. Negative on every element which is not a wall.
+        RRVector elementWallHtc;
+        //! Wall reference temperature - the fluid temperature the conductance acts
+        //! across. Meaningful only where elementWallHtc is not negative.
+        RRVector elementWallHtt;
 
         //! Vector of element level shape function derivatives.
         std::vector<RElementShapeDerivation *> shapeDerivations;
@@ -60,13 +90,14 @@ class RSolverFluidHeat : public RSolverGeneric
 
     public:
 
-        //! Key the solved fluid node temperature is shared under, so the heat
-        //! solver can drive its Forced convection walls with it.
-        static const QString fluidNodeTemperatureKey;
+        //! Key the wall heat transfer coefficient is shared under, so the heat
+        //! solver can drive its Forced convection walls with it. An element
+        //! vector, negative on every element which is not a wall.
+        static const QString wallHeatTransferCoefficientKey;
 
-        //! Key the fluid node velocity magnitude is shared under, for the same
-        //! reason. Recovered from the fluid solver results, not solved here.
-        static const QString fluidNodeVelocityKey;
+        //! Key the wall reference temperature is shared under, for the same
+        //! reason. An element vector paired with the coefficient.
+        static const QString wallFluidTemperatureKey;
 
         //! Constructor.
         explicit RSolverFluidHeat(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData);
@@ -85,10 +116,34 @@ class RSolverFluidHeat : public RSolverGeneric
         //! Generate node heat input vector.
         void generateNodeHeatVector();
 
-        //! Initialize solver.
+        //! Find the fluid volume element behind every surface element carrying
+        //! the Forced convection condition, and the nodes of such walls.
+        void findWallElements();
+
+        //! Hold the wall nodes at the temperature the heat solver computed in
+        //! the solid, once it has run. Until then the walls are adiabatic.
+        //! The temperature is relaxed with the Aitken factor, which takes the
+        //! alternation of the two solves to the coupled solution in a few passes
+        //! where plain alternation can take hundreds.
+        void applyWallTemperature();
+
+        //! Compute the wall heat transfer coefficient and reference temperature.
+        //! Together they reproduce the heat flux the fluid solve takes through
+        //! the wall.
+        void computeWallHeatTransfer();
+
+        //! Return the heat entering the fluid through every wall node held at
+        //! the solid temperature - the residual of the fluid system at that node,
+        //! which is the flux consistent with the discretisation.
+        RRVector computeWallReaction();
+
         //! Store solver results into the shared data container.
         void storeSharedData() override;
 
+        //! Recover previously computed results from the shared data container.
+        void recoverSharedData() override;
+
+        //! Initialize solver.
         void initialize() override;
 
         //! Update scales.

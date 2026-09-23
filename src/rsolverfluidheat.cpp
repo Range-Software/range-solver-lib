@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 
@@ -5,6 +6,7 @@
 
 #include "rsolverfluid.h"
 #include "rsolverfluidheat.h"
+#include "rsolverheat.h"
 #include "rmatrixsolver.h"
 
 class FluidHeatMatrixContainer
@@ -61,11 +63,15 @@ class FluidHeatMatrixContainer
         }
 };
 
-const QString RSolverFluidHeat::fluidNodeTemperatureKey("fluid-node-temperature");
-const QString RSolverFluidHeat::fluidNodeVelocityKey("fluid-node-velocity");
+const QString RSolverFluidHeat::wallHeatTransferCoefficientKey("fluid-wall-heat-transfer-coefficient");
+const QString RSolverFluidHeat::wallFluidTemperatureKey("fluid-wall-fluid-temperature");
 
 RSolverFluidHeat::RSolverFluidHeat(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
+    , streamVelocity(1.0)
+    , cvgT(0.0)
+    , wallCoupled(false)
+    , wallRelaxation(1.0)
     , statsCounter(0)
     , statsOldResidual(0.0)
 {
@@ -79,7 +85,23 @@ RSolverFluidHeat::~RSolverFluidHeat()
 
 bool RSolverFluidHeat::hasConverged() const
 {
-    return true;
+    // Without walls held at the solid temperature there is nothing to iterate
+    // on - one solve is the answer.
+    if (!this->wallCoupled)
+    {
+        return true;
+    }
+    // A task group with no convergence value runs all of its iterations.
+    if (this->taskCvgValue <= 0.0)
+    {
+        return false;
+    }
+    // The first coupled pass has no previous one to compare against.
+    if (this->taskIteration < 1)
+    {
+        return false;
+    }
+    return (this->cvgT < this->taskCvgValue);
 }
 
 double RSolverFluidHeat::findTemperatureScale() const
@@ -127,24 +149,417 @@ void RSolverFluidHeat::generateNodeHeatVector()
     }
 }
 
+void RSolverFluidHeat::findWallElements()
+{
+    this->wallFluidElements.resize(this->pModel->getNElements());
+    this->wallFluidElements.fill(RConstants::eod);
+    this->wallNodes.resize(this->pModel->getNNodes());
+    this->wallNodes.fill(false);
+
+    // The relaxation starts over with every task run - every time step.
+    this->wallTemperature.clear();
+    this->wallResidual.clear();
+    this->wallRelaxation = 1.0;
+
+    // Index fluid volume elements by node so the search below stays local.
+    std::vector<std::vector<uint>> nodeToFluidElements(this->pModel->getNNodes());
+    for (uint i=0;i<this->pModel->getNElements();i++)
+    {
+        const RElement &rElement = this->pModel->getElement(i);
+        if (!this->computableElements[i] || !R_ELEMENT_TYPE_IS_VOLUME(rElement.getType()))
+        {
+            continue;
+        }
+        for (uint j=0;j<rElement.size();j++)
+        {
+            nodeToFluidElements[rElement.getNodeId(j)].push_back(i);
+        }
+    }
+
+    // A wall is a surface element carrying the Forced convection condition whose
+    // nodes are all shared with a fluid volume element - the mesh is conformal,
+    // so the fluid element behind the wall contains the whole face.
+    for (uint i=0;i<this->pModel->getNSurfaces();i++)
+    {
+        const RSurface &rSurface = this->pModel->getSurface(i);
+        if (!rSurface.hasBoundaryCondition(R_BOUNDARY_CONDITION_CONVECTION_FORCED))
+        {
+            continue;
+        }
+
+        for (uint j=0;j<rSurface.size();j++)
+        {
+            uint elementID = rSurface.get(j);
+            const RElement &rElement = this->pModel->getElement(elementID);
+
+            for (uint fluidElementID : nodeToFluidElements[rElement.getNodeId(0)])
+            {
+                const RElement &rFluidElement = this->pModel->getElement(fluidElementID);
+                uint nNodesFound = 0;
+                for (uint k=0;k<rElement.size();k++)
+                {
+                    if (rFluidElement.hasNodeId(rElement.getNodeId(k)))
+                    {
+                        nNodesFound++;
+                    }
+                }
+                if (nNodesFound == rElement.size())
+                {
+                    this->wallFluidElements[elementID] = fluidElementID;
+                    for (uint k=0;k<rElement.size();k++)
+                    {
+                        this->wallNodes[rElement.getNodeId(k)] = true;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void RSolverFluidHeat::applyWallTemperature()
+{
+    this->wallCoupled = false;
+    this->coupledWallNodes.resize(this->pModel->getNNodes());
+    this->coupledWallNodes.fill(false);
+
+    if (this->solidNodeTemperature.size() != this->pModel->getNNodes())
+    {
+        return;
+    }
+
+    // A node prescribed explicitly keeps its value - the solid temperature only
+    // replaces the adiabatic wall.
+    RBVector disabledPositions(this->nodeBook.size(),false);
+    RBVector &coupledNodes = this->coupledWallNodes;
+    for (uint i=0;i<this->nodeBook.size();i++)
+    {
+        uint position = 0;
+        if (!this->nodeBook.getValue(i,position))
+        {
+            disabledPositions[i] = true;
+        }
+        else if (this->wallNodes[i])
+        {
+            disabledPositions[i] = true;
+            coupledNodes[i] = true;
+            this->wallCoupled = true;
+        }
+    }
+
+    if (!this->wallCoupled)
+    {
+        return;
+    }
+
+    RSolverGeneric::rebuildNodeBook(this->nodeBook,disabledPositions);
+
+    if (this->wallTemperature.size() != this->pModel->getNNodes())
+    {
+        // First coupled pass - take the solid temperature as it is.
+        this->wallTemperature = this->solidNodeTemperature;
+    }
+    else
+    {
+        // Aitken relaxation. With the residual r = T_solid - T_wall of this pass
+        // and of the previous one, the factor is updated as
+        //
+        //   w = -w * (r_old . (r - r_old)) / |r - r_old|^2
+        //
+        // which is the secant step of the fixed point iteration - exact for a
+        // linear problem, where it lands on the coupled solution at once.
+        RRVector residual(this->pModel->getNNodes(),0.0);
+        for (uint i=0;i<residual.size();i++)
+        {
+            if (coupledNodes[i])
+            {
+                residual[i] = this->solidNodeTemperature[i] - this->wallTemperature[i];
+            }
+        }
+
+        if (this->wallResidual.size() == residual.size())
+        {
+            double numerator = 0.0;
+            double denominator = 0.0;
+            for (uint i=0;i<residual.size();i++)
+            {
+                double dr = residual[i] - this->wallResidual[i];
+                numerator += this->wallResidual[i] * dr;
+                denominator += dr * dr;
+            }
+            if (denominator > RConstants::eps * RConstants::eps)
+            {
+                // Bounded, so one noisy pass can not throw the walls far off.
+                const double maxRelaxation = 100.0;
+                this->wallRelaxation = std::clamp(-this->wallRelaxation * numerator / denominator,-maxRelaxation,maxRelaxation);
+            }
+        }
+        this->wallResidual = residual;
+
+        for (uint i=0;i<residual.size();i++)
+        {
+            if (coupledNodes[i])
+            {
+                this->wallTemperature[i] = std::max(this->wallTemperature[i] + this->wallRelaxation * residual[i],0.0);
+            }
+        }
+    }
+
+    for (uint i=0;i<this->pModel->getNNodes();i++)
+    {
+        if (coupledNodes[i])
+        {
+            this->nodeTemperature[i] = this->wallTemperature[i];
+        }
+    }
+}
+
+void RSolverFluidHeat::computeWallHeatTransfer()
+{
+    this->elementWallHtc.resize(this->pModel->getNElements());
+    this->elementWallHtc.fill(-1.0);
+    this->elementWallHtt.resize(this->pModel->getNElements());
+    this->elementWallHtt.fill(0.0);
+
+    // With the gradient of the fluid element g_i = dN_i/dn along the wall normal
+    // pointing into the fluid, and the wall nodes all at T_w, the heat flux
+    // leaving the solid is
+    //
+    //   q = -k * sum_i(g_i * T_i) = k * G * (T_w - T_ref)
+    //
+    // where the sum runs over the nodes off the wall, G = sum_i(g_i) and
+    // T_ref = sum_i(g_i * T_i) / G - the derivatives of all nodes sum to zero.
+    // For a linear tetrahedron G is the reciprocal of its height over the wall
+    // and T_ref the temperature of the node opposite, so h = k * G is exactly the
+    // conductance of the first fluid element.
+    //
+    // That gradient is only first order accurate in a thin boundary layer. Once
+    // the walls are held at the solid temperature, the flux is instead taken
+    // from the residual of the fluid system at the wall nodes - the flux a
+    // single solve of both domains would see - and T_ref is set so that the same
+    // conductance reproduces it:
+    //
+    //   T_ref = T_w - q / h
+    //
+    // The conductance is kept as the coefficient either way. It is what the
+    // heat solver couples the wall through, and a value close to the true
+    // sensitivity of the fluid flux keeps the alternation of the two solves
+    // short.
+    RRVector nodeFlux;
+    if (this->wallCoupled)
+    {
+        nodeFlux = this->computeWallReaction();
+
+        // Turn the nodal heat into a flux density with the wall area lumped to
+        // the nodes.
+        RRVector nodeArea(this->pModel->getNNodes(),0.0);
+        for (uint i=0;i<this->pModel->getNElements();i++)
+        {
+            if (this->wallFluidElements[i] == RConstants::eod)
+            {
+                continue;
+            }
+            const RElement &rWallElement = this->pModel->getElement(i);
+            double area = 0.0;
+            if (!rWallElement.findArea(this->pModel->getNodes(),area))
+            {
+                continue;
+            }
+            for (uint j=0;j<rWallElement.size();j++)
+            {
+                nodeArea[rWallElement.getNodeId(j)] += area / double(rWallElement.size());
+            }
+        }
+        for (uint i=0;i<nodeFlux.size();i++)
+        {
+            nodeFlux[i] = (nodeArea[i] > 0.0) ? nodeFlux[i] / nodeArea[i] : 0.0;
+        }
+    }
+
+    for (uint i=0;i<this->pModel->getNElements();i++)
+    {
+        uint fluidElementID = this->wallFluidElements[i];
+        if (fluidElementID == RConstants::eod || !this->shapeDerivations[fluidElementID])
+        {
+            continue;
+        }
+
+        const RElement &rWallElement = this->pModel->getElement(i);
+        const RElement &rFluidElement = this->pModel->getElement(fluidElementID);
+
+        RR3Vector normal;
+        if (!rWallElement.findNormal(this->pModel->getNodes(),normal[0],normal[1],normal[2]))
+        {
+            continue;
+        }
+
+        RR3Vector wallCenter;
+        RR3Vector fluidCenter;
+        rWallElement.findCenter(this->pModel->getNodes(),wallCenter[0],wallCenter[1],wallCenter[2]);
+        rFluidElement.findCenter(this->pModel->getNodes(),fluidCenter[0],fluidCenter[1],fluidCenter[2]);
+        RR3Vector inward;
+        RR3Vector::subtract(fluidCenter,wallCenter,inward);
+        if (RR3Vector::dot(normal,inward) < 0.0)
+        {
+            normal *= -1.0;
+        }
+
+        // Derivatives averaged over the element - exact for the constant
+        // derivative elements, the element centre value for the others.
+        uint nInp = RElement::hasConstantDerivative(rFluidElement.getType()) ? 1 : RElement::getNIntegrationPoints(rFluidElement.getType());
+
+        double G = 0.0;
+        double GT = 0.0;
+        for (uint m=0;m<rFluidElement.size();m++)
+        {
+            uint nodeID = rFluidElement.getNodeId(m);
+            if (rWallElement.hasNodeId(nodeID))
+            {
+                continue;
+            }
+            double g = 0.0;
+            for (uint k=0;k<nInp;k++)
+            {
+                const RRMatrix &B = this->shapeDerivations[fluidElementID]->getDerivative(k);
+                g += (B[m][0]*normal[0] + B[m][1]*normal[1] + B[m][2]*normal[2]) / double(nInp);
+            }
+            G += g;
+            GT += g * this->nodeTemperature[nodeID];
+        }
+
+        if (G <= RConstants::eps)
+        {
+            continue;
+        }
+
+        this->elementWallHtc[i] = this->elementConduction[fluidElementID] * G;
+        this->elementWallHtt[i] = GT / G;
+
+        if (!this->wallCoupled)
+        {
+            continue;
+        }
+
+        bool coupled = true;
+        double wallTemperature = 0.0;
+        double wallFlux = 0.0;
+        for (uint j=0;j<rWallElement.size();j++)
+        {
+            uint nodeID = rWallElement.getNodeId(j);
+            coupled = coupled && this->coupledWallNodes[nodeID];
+            wallTemperature += this->nodeTemperature[nodeID] / double(rWallElement.size());
+            wallFlux += nodeFlux[nodeID] / double(rWallElement.size());
+        }
+        if (coupled)
+        {
+            this->elementWallHtt[i] = wallTemperature - wallFlux / this->elementWallHtc[i];
+        }
+    }
+}
+
+RRVector RSolverFluidHeat::computeWallReaction()
+{
+    RRVector reaction(this->pModel->getNNodes(),0.0);
+
+    bool unsteady = this->pModel->getTimeSolver().getEnabled();
+
+    // The element matrices of a transient solve are built against the previous
+    // time level, so it is put back for the rebuild.
+    RRVector nodeTemperatureNew(this->nodeTemperature);
+    if (unsteady && this->nodeTemperatureOld.size() == this->nodeTemperature.size())
+    {
+        this->nodeTemperature = this->nodeTemperatureOld;
+    }
+
+    RMatrixManager<FluidHeatMatrixContainer> matrixManager;
+
+    for (uint i=0;i<this->pModel->getNElements();i++)
+    {
+        const RElement &rElement = this->pModel->getElement(i);
+        if (!this->computableElements[i] || !R_ELEMENT_TYPE_IS_VOLUME(rElement.getType()))
+        {
+            continue;
+        }
+
+        bool touchesWall = false;
+        for (uint j=0;j<rElement.size() && !touchesWall;j++)
+        {
+            touchesWall = this->coupledWallNodes[rElement.getNodeId(j)];
+        }
+        if (!touchesWall)
+        {
+            continue;
+        }
+
+        uint nen = rElement.size();
+        RRMatrix Ae(nen,nen,0.0);
+        RRVector be(nen,0.0);
+        this->computeElement(i,Ae,be,matrixManager);
+
+        for (uint m=0;m<nen;m++)
+        {
+            uint nodeID = rElement.getNodeId(m);
+            if (!this->coupledWallNodes[nodeID])
+            {
+                continue;
+            }
+            double r = -be[m];
+            for (uint n=0;n<nen;n++)
+            {
+                r += Ae[m][n] * nodeTemperatureNew[rElement.getNodeId(n)];
+            }
+            reaction[nodeID] += r;
+        }
+    }
+
+    this->nodeTemperature = nodeTemperatureNew;
+
+    // A transient system is the heat balance over one time step.
+    if (unsteady)
+    {
+        double dt = this->pModel->getTimeSolver().getCurrentTimeStepSize();
+        if (dt > 0.0)
+        {
+            reaction *= 1.0 / dt;
+        }
+    }
+
+    return reaction;
+}
+
 void RSolverFluidHeat::storeSharedData()
 {
     this->RSolverGeneric::storeSharedData();
 
-    // Published under a key of its own so the heat solver can drive its Forced
-    // convection walls with it. The shared element temperature will not do - the
-    // heat solve overwrites that over the whole mesh once it has run.
-    this->pSharedData->addData(RSolverFluidHeat::fluidNodeTemperatureKey,this->nodeTemperature);
+    // Shared in SI units - the heat solver works in scales of its own.
+    double htcScale = this->scales.findScaleFactor(R_VARIABLE_HEAT_TRANSFER_COEFFICIENT);
+    double temperatureScale = this->scales.findScaleFactor(R_VARIABLE_TEMPERATURE);
 
-    // The correlation needs a mean velocity, so the magnitude is enough.
-    RRVector nodeVelocityMagnitude(this->pModel->getNNodes(),0.0);
-    for (uint i=0;i<this->pModel->getNNodes();i++)
+    RRVector htc(this->elementWallHtc);
+    RRVector htt(this->elementWallHtt);
+    for (uint i=0;i<htc.size();i++)
     {
-        nodeVelocityMagnitude[i] = std::sqrt(this->nodeVelocity.x[i]*this->nodeVelocity.x[i]
-                                           + this->nodeVelocity.y[i]*this->nodeVelocity.y[i]
-                                           + this->nodeVelocity.z[i]*this->nodeVelocity.z[i]);
+        if (htc[i] >= 0.0)
+        {
+            htc[i] /= htcScale;
+            htt[i] /= temperatureScale;
+        }
     }
-    this->pSharedData->addData(RSolverFluidHeat::fluidNodeVelocityKey,nodeVelocityMagnitude);
+
+    this->pSharedData->addData(RSolverFluidHeat::wallHeatTransferCoefficientKey,htc);
+    this->pSharedData->addData(RSolverFluidHeat::wallFluidTemperatureKey,htt);
+}
+
+void RSolverFluidHeat::recoverSharedData()
+{
+    this->RSolverGeneric::recoverSharedData();
+
+    this->solidNodeTemperature.clear();
+    if (this->pSharedData->hasData(RSolverHeat::solidNodeTemperatureKey,this->pModel->getNNodes()))
+    {
+        this->solidNodeTemperature = this->pSharedData->findData(RSolverHeat::solidNodeTemperatureKey);
+        this->solidNodeTemperature *= this->scales.findScaleFactor(R_VARIABLE_TEMPERATURE);
+    }
 }
 
 void RSolverFluidHeat::initialize()
@@ -202,10 +617,14 @@ void RSolverFluidHeat::prepare()
 
     RBVector temperatureSetValues;
 
-    if (this->taskIteration == 0 || this->meshChanged)
+    if (this->taskIteration == 0 || this->meshChanged || this->wallFluidElements.size() != this->pModel->getNElements())
     {
-        this->generateNodeBook(R_PROBLEM_FLUID_HEAT);
+        this->findWallElements();
     }
+
+    // Rebuilt on every pass - the wall nodes leave the system once the heat
+    // solver has provided a solid temperature for them.
+    this->generateNodeBook(R_PROBLEM_FLUID_HEAT);
 
     this->generateVariableVector(R_VARIABLE_TEMPERATURE,this->elementTemperature,temperatureSetValues,true,this->firstRun,this->firstRun);
     this->generateMaterialVecor(RMaterialProperty::ThermalConductivity,this->elementConduction);
@@ -215,6 +634,8 @@ void RSolverFluidHeat::prepare()
     this->generateNodeHeatVector();
 
     this->pModel->convertElementToNodeVector(this->elementTemperature,temperatureSetValues,this->nodeTemperature,true);
+
+    this->applyWallTemperature();
 
     this->pModel->convertNodeToElementVector(this->nodeVelocity.x,this->elementVelocity.x);
     this->pModel->convertNodeToElementVector(this->nodeVelocity.y,this->elementVelocity.y);
@@ -352,20 +773,28 @@ void RSolverFluidHeat::solve()
     this->updateStopWatch.reset();
     this->updateStopWatch.resume();
 
-    double tOld = RRVector::euclideanNorm(this->nodeTemperature);
+    // Kept for the wall reaction, whose element matrices are built against it.
+    this->nodeTemperatureOld = this->nodeTemperature;
+
+    // Relative size of the change - ||dT|| / ||T|| - so it can be compared
+    // against the convergence value of the task group.
+    double dtNorm = 0.0;
+    double tNorm = 0.0;
 
     for (uint i=0;i<this->pModel->getNNodes();i++)
     {
         uint position = 0;
         if (this->nodeBook.getValue(i,position))
         {
-            this->nodeTemperature[i] = std::max(this->x[position],0.0);
+            double t = std::max(this->x[position],0.0);
+            double dt = t - this->nodeTemperature[i];
+            dtNorm += dt*dt;
+            tNorm += t*t;
+            this->nodeTemperature[i] = t;
         }
     }
 
-    double t = RRVector::euclideanNorm(this->nodeTemperature);
-
-    this->cvgT = (t - tOld) / this->scales.findScaleFactor(R_VARIABLE_TEMPERATURE);
+    this->cvgT = (tNorm > 0.0) ? std::sqrt(dtNorm/tNorm) : 0.0;
 
     this->updateStopWatch.pause();
 
@@ -427,6 +856,8 @@ void RSolverFluidHeat::process()
         this->elementHeatFlux[elementID][1] = Qy;
         this->elementHeatFlux[elementID][2] = Qz;
     }
+
+    this->computeWallHeatTransfer();
 }
 
 void RSolverFluidHeat::store()
@@ -494,6 +925,16 @@ void RSolverFluidHeat::statistics()
     this->processMonitoringPoints();
 
     RLogger::info("Convergence:   %-13g\n",residual);
+    if (this->wallCoupled)
+    {
+        RLogger::info("Walls held at the solid temperature - convergence-T: %-13g\n",this->cvgT);
+        if (this->taskCvgValue > 0.0)
+        {
+            RLogger::info("Convergence target: %-13g%s\n",
+                          this->taskCvgValue,
+                          this->hasConverged() ? " (reached)" : "");
+        }
+    }
     RLogger::info("Build time:    %9u [ms]\n",this->buildStopWatch.getMiliSeconds());
     RLogger::info("Assembly time: %9u [ms]\n",this->assemblyStopWatch.getMiliSeconds());
     RLogger::info("Solver time:   %9u [ms]\n",this->solverStopWatch.getMiliSeconds());
@@ -639,8 +1080,9 @@ void RSolverFluidHeat::computeElementGeneral(unsigned int elementID, RRMatrix &A
                 }
                 // c matrix
                 ce[m][n] = ca * N[m] * vdiv[n];
-                // k matrix
-                ke[m][n] = -k * (B[m][0] * B[n][0] + B[m][1] * B[n][1] + B[m][2] * B[n][2]);
+                // k matrix - the weak form of -div(k*grad(T)), which enters with
+                // the same sign as the advection term c.
+                ke[m][n] = k * (B[m][0] * B[n][0] + B[m][1] * B[n][1] + B[m][2] * B[n][2]);
                 // k~ matrix
                 kte[m][n] = Tsupg * ca * vdiv[m] * vdiv[n];
                 // y~ matrix
@@ -780,8 +1222,9 @@ void RSolverFluidHeat::computeElementConstantDerivative(unsigned int elementID, 
             }
             // c matrix
             ce[m][n] = ca * iN[m] * vdiv[n];
-            // k matrix
-            ke[m][n] = -k * wt * (B[m][0] * B[n][0] + B[m][1] * B[n][1] + B[m][2] * B[n][2]);
+            // k matrix - the weak form of -div(k*grad(T)), which enters with
+            // the same sign as the advection term c.
+            ke[m][n] = k * wt * (B[m][0] * B[n][0] + B[m][1] * B[n][1] + B[m][2] * B[n][2]);
             // k~ matrix
             kte[m][n] = Tsupg * ca * vdiv[m] * vdiv[n] * wt;
             // y~ matrix

@@ -237,7 +237,83 @@ the machine epsilon and that block reads `1`.
   bar near and far against direct integration and the finite wire formula, a
   wire and a strip, and an electro-statics task driving a magnetostatics one
 
+#### Conjugate heat transfer at fluid walls
+
+- The **Forced convection** condition on a wall between a meshed solid and a
+  meshed fluid couples **RSolverHeat** and **RSolverFluidHeat** directly instead
+  of feeding the fluid state into the flat plate correlation. The correlation
+  needs a free-stream velocity and a bulk temperature. What it got was the
+  average over the fluid element behind the wall, three of whose four nodes lie
+  on the wall - where a no-slip flow is at rest and the temperature is the
+  solid's. The velocity came out as a fraction of the one off-wall node, or
+  exactly zero where that node sat on another wall, and the wall was then left
+  unconvected. The fluid temperature was pulled towards the wall temperature
+  the same way
+- **RSolverFluidHeat** holds the wall nodes at the temperature the heat solver
+  computed in the solid, once it has run, and publishes for every wall element
+  a heat transfer coefficient and a reference temperature. The coefficient is
+  `k * G`, the conductance of the first fluid element - with `G` the sum of the
+  shape function derivatives of its off-wall nodes along the wall normal, which
+  is the reciprocal of the element height for a tetrahedron. The reference
+  temperature makes the pair reproduce the heat entering the fluid at the wall
+  nodes, taken as the residual of the fluid system there. That is the flux a
+  single solve of both domains would see, where the gradient of the first
+  element is only first order accurate in a thin boundary layer - it missed the
+  interface temperature of the unit test by 1.5 K
+- Before the first heat solve the wall is insulated and the reference
+  temperature is the gradient weighted temperature of the off-wall nodes
+- **RSolverHeat** applies the pair as it would a *Simple convection* condition.
+  The correlation, and with it the configured *Fluid temperature* and
+  *Velocity*, is used only on elements no fluid heat result covers - a surface
+  bordering no meshed fluid, or the first pass of a coupled run. The log says
+  per entity which of the two is in use, and for how many of its elements
+- The wall temperature handed to the fluid solve is relaxed with the **Aitken**
+  factor of the last two passes. Plain alternation contracts by
+  `(h - S) / (Ks + h)` per pass, with `h` the first element conductance, `S` the
+  conductance of the whole fluid and `Ks` that of the solid, which is close to
+  one for a poorly conducting solid against a well resolved fluid - the unit
+  test needs about 160 passes that way, and 5 with the relaxation. The factor is
+  bounded to `[-100, 100]` and starts over with every task run
+- Both solvers report the relative change `||dT|| / ||T||` of their temperature
+  field as their convergence while they are coupled, and remain unconditionally
+  converged otherwise, so a group holding only an uncoupled heat task still ends
+  after one iteration. **RSolverFluidHeat** reports the relative change in its
+  convergence file too, instead of the difference of the field norms
+- The coupling data is shared under `RSolverFluidHeat::wallHeatTransferCoefficientKey`,
+  `RSolverFluidHeat::wallFluidTemperatureKey` and
+  `RSolverHeat::solidNodeTemperatureKey`, in SI units, so the two solvers may use
+  scales of their own. `RSolverFluidHeat::fluidNodeTemperatureKey`,
+  `RSolverFluidHeat::fluidNodeVelocityKey`, `RSolverHeat::findFluidTemperature()`,
+  `RSolverHeat::findFluidVelocity()` and `RSolverHeat::findFluidElements()` are
+  gone; the pairing of walls with fluid elements moved to
+  **RSolverFluidHeat::findWallElements()**, and only walls carrying the *Forced
+  convection* condition are paired
+- **RSolverHeat** solves **solids only**. Its `findComputableElements()` drops
+  every volume whose material **RMaterial::isFluid()** reports as a fluid,
+  whatever properties or conditions it carries - a fluid carrying an emissivity,
+  as the mercury of the material database does, used to be conducted through
+  as a solid, overwriting the temperature the fluid heat solver computed. A
+  point, line or surface element made computable by a condition rather than by
+  a solid material of its own is dropped too where all its nodes touch the
+  fluid and not all touch the solid - an inlet or an outlet - since nothing
+  would connect it to the solid. A condition on it which the fluid heat solver
+  does not read is reported
+- Unit tests in `tst_solver_heat_coupling` check that a heat task leaves a fluid
+  carrying every heat property untouched, the parabola of a uniformly heated
+  fluid at rest, and the interface temperature of a solid slab against a fluid
+  slab - at rest, and with the fluid flowing towards the wall at a Peclet number
+  of 7 - against the closed form, within ten coupled passes
+
 ### Bug fixes
+
+#### Fluid heat conduction sign
+
+- **RSolverFluidHeat** assembles the conduction term with the same sign as the
+  advection term. The element matrix held `+rho*c*v.grad(T)` next to
+  `-k*grad(N).grad(N)`, which is the equation of the flow running the other way
+  round: the heat was carried upstream, and a *Heat* source cooled the fluid
+  instead of heating it. A fluid at rest with no source has the same solution
+  either way, which is why a pure conduction check never showed it
 
 #### Electrostatic result recovery
 
