@@ -1,591 +1,381 @@
-## Version 1.3.1
-
-### Improvements
-
-#### Fluid solver convergence
-
-- **RSolverFluid** reports convergence, which it never did before. A task group
-  holding a flow task used to run its full iteration count every time, since
-  `hasConverged()` always answered no, and choosing the count was left entirely
-  to the user
-- The criterion has two parts, and both have to hold. The first is the
-  **relative size of the Newton increment** - the iteration has settled once the
-  step the field takes is negligible against the field itself. It is reported as
-  `Convergence-V` and `Convergence-P` and compared against the convergence value
-  of the task group driving the solver
-- The second is that the **residual has come down**: it has to have fallen to a
-  tenth of what it was at the first pass of the same solve, each time step
-  counting as a solve of its own. A nearly singular system - a model with no
-  pressure reference, or a mesh which can not carry the Reynolds number asked of
-  it - takes tiny steps because it can not move rather than because it has
-  arrived, and its residual stays where it was or climbs. Without this part such
-  a run reports convergence on its second pass and returns a field which is not
-  a solution. The ratio and its target are printed in the log
-- The residual part is a fixed tenth rather than a second setting, so a loose
-  convergence value cannot disable the check it exists to perform. A slowly
-  converging model may never satisfy it and then runs its full iteration count,
-  which is the behaviour of earlier versions
-- Those two quantities are now computed as `||dv|| / ||v||` and `||dp|| / ||p||`
-  rather than as the signed difference of the field norms before and after the
-  update. A difference of norms is not a measure of change - two entirely
-  different fields can share a norm - and it was neither positive nor
-  dimensionless, so nothing could be compared against it. The convergence graph
-  of a flow run therefore looks different, and now falls monotonically as the
-  run settles
-- Both norms are taken inside the downscaling bracket, so the ratio is
-  dimensionless and no longer needs a scale factor. The pass over the nodes which
-  computed the old field norms is gone
-- The solver takes at least two passes before reporting convergence, so a field
-  which has not moved yet - a model with no inflow, or the very first assembly -
-  is not mistaken for a converged one
-- The log prints the convergence target of the group and marks the iteration
-  which reached it
-- **RSolverGeneric::run()** takes the convergence value of the task group as a
-  third argument and **RSolver::runProblemTask()** passes it down, so a solver
-  can compare its own convergence against what the group asks for
-
-#### Jacobian verification
-
-- **RSolverFluid::verifyJacobian()** compares the assembled matrix against a
-  finite difference of the residual and reports where the two disagree. The
-  iteration solves `A*dx = b` and applies `x += dx`, so it drives `b(x)` to zero
-  and the exact Newton matrix is `-db/dx`. Each unknown is perturbed in turn,
-  the system reassembled either side of it, and the resulting column compared
-  with the assembled one
-- The report gives the ratio of the assembled entry to the measured one per
-  block of the system - velocity/velocity, velocity/pressure, pressure/velocity,
-  pressure/pressure - as minimum, median and maximum, together with the single
-  largest disagreement and the node and component it sits on. A block whose
-  ratio is one throughout is assembled correctly; a block whose ratio is some
-  other number throughout carries that factor too many
-- The stabilisation parameters and the element length are held at their
-  unperturbed values for the duration of the sweep. They follow the velocity but
-  the matrix carries no derivative of them, so letting them move would put an
-  expected disagreement into every term they touch and hide the one being looked
-  for. The pass counter and the mesh-changed flag are held as well, so that
-  reassembling does not rebuild the field from the boundary conditions or resize
-  the system in the middle of the sweep
-- The report groups the ratios within a block, so a block made of several terms
-  can be told apart: a group at `1` and a group at something else names a factor
-  and says how many entries carry it
-- The central difference step is sized at about the cube root of the machine
-  epsilon. At `1.0e-7` the pressure block of a model at rest read 2.5 per cent
-  out - the residual there is dominated by terms the perturbation does not reach,
-  and the difference lost the signal to cancellation. That reading was the check
-  and not the solver
-- The check refreshes the nodal acceleration for every perturbed assembly. The
-  acceleration is a function of the velocity being perturbed, but `prepare()` does
-  not recompute it - `solve()` does, as part of the update - so without this the
-  difference misses the whole time-derivative term and every transient reading is
-  wrong
-- It is asked for with `--verify-jacobian` on the solver command line, runs once,
-  and reassembles the whole system twice per unknown - so it belongs on a mesh of
-  a few elements and nowhere else
-
-#### What the verification found - diagnosed, not applied
-
-Four terms of the fluid matrix are demonstrably not the derivative of the
-residual it is solved against. Every one of the corrections below was written,
-confirmed with the check, and measured on a reference model. **None of them is
-applied.** Each one makes the iteration worse in practice, and they are recorded
-here with their evidence so that the next attempt starts from it.
-
-- **Viscous coefficient.** The matrix carries `ro * u` where the residual, and
-  the momentum equation, carry `u` alone. On a steady model at rest - where the
-  viscous term is all the velocity/velocity block holds - the check reports that
-  block at a median of exactly `1e+06`, the density in the units the solver works
-  in, while every other block reports `1`. For water the matrix is a million
-  times too stiff in the viscous directions, which is why a steady-state model
-  crawls
-- **Mass terms.** The matrix carries a consistent mass, `ro*iNiN`, and a
-  consistent SUPG mass, while the residual weights the nodal acceleration of one
-  node alone - `mvScale*ax[m]` and `ctvScale*ax[m]`, a lumped mass. The matrix
-  therefore holds off-diagonal terms the residual has no counterpart for
-- **PSPG acceleration term.** The same mistake a third time, in `bteScale`
-- **Theta weighting.** The matrix scales the spatial terms by `alpha*dt` while
-  the residual scales them by `dt`, so under the central difference march - which
-  is `RTimeSolver`'s default - the check reports the velocity/velocity block at
-  `0.5`
-- The general path has a defect of its own: its mass is written as
-  `me[m][m] = ro*N[m]*N[n]` inside the `n` loop, so the last `n` wins and the
-  value is neither consistent nor lumped. Hexahedral transient models assemble a
-  meaningless mass matrix; tetrahedral ones take the other path and are
-  unaffected
-
-With the first four corrected the check reports every block of a steady and a
-transient model at `1`, bar the scatter of the convective linearisation. The
-iteration, however, gets worse rather than better:
-
-| configuration | steady-state | reference transient step, 10 passes |
-|---|---|---|
-| **as shipped** | monotone, no rise in 498 passes | `3.03` |
-| viscous and mass corrected | **oscillates - 119 rises in 258 passes**, residual up 75 per cent on the second pass | `0.557` |
-| plus the theta correction | - | `1.96` |
-| plus the PSPG mass correction | - | `155`, climbing |
-
-The transient case improves and the steady case falls apart. Corrected, the
-Jacobian is far softer, the first Newton step overshoots by three quarters, and
-the iteration spends its life in an overshoot-retreat cycle. A trend-following
-relaxation cannot hold it: growing more slowly (`1.05`, `1.02`) made it worse
-still, and a backtracking line search which takes a bad step back rather than
-living with it smoothed the trajectory but cost more passes than it saved.
-
-**What this says about the solver is worth more than the corrections would have
-been: a more exact Jacobian is not automatically a better iteration matrix here.**
-The system is convection dominated and its true Jacobian is indefinite, so the
-terms which do not belong have been acting as stabilisation. Applying the
-corrections needs a globalisation strong enough to cope with the honest Jacobian -
-a line search on the residual, cheap enough to try several step lengths within
-one pass, which the present structure cannot do because the residual is only
-available from a full `prepare()`.
-
-A note on what the check itself got wrong along the way: a pressure/pressure
-reading of `1.025` was the difference and not the matrix - at a step of `1.0e-7`
-the residual there is dominated by terms the perturbation does not reach and the
-signal was lost to cancellation. The step is now sized at about the cube root of
-the machine epsilon and that block reads `1`.
-
-#### Fluid solver iteration
-
-- **RSolverFluid** damps its step. The matrix it solves is not the exact
-  derivative of the residual it drives to zero, so a full Newton step can
-  overshoot and leave the field further from a solution than it started. The
-  solver now applies `x += omega * dx`, halving `omega` down to a floor of `0.1`
-  after a pass which raised the residual and growing it back by a quarter at a
-  time after a pass which lowered it. `omega` starts at `1` and is reset to `1`
-  at the start of each solve, so a run which never overshoots behaves exactly as
-  before. The value in force is logged as `Relaxation`
-- Only a rise of more than two per cent counts as an overshoot. The residual of a
-  stabilised flow model wanders a little from pass to pass even while it is
-  converging, and retreating on every one of those stalls the iteration at a step
-  too short to make progress - measured, with the floor lowered to `0.01` and no
-  tolerance, as a run which settled at a residual ratio of `0.48` where it
-  reached `0.17` with one
-- The residual of a pass is computed once, at the start of the pass in
-  `updateResidualAndRelaxation()`, and reused by the convergence test and the
-  statistics rather than being assembled twice
-- Measured on the reference transient model, the step which used to climb
-  `2.79`, `3.05`, `3.07` across its first three passes now retreats to
-  `omega = 0.5` on the second and descends from there to `2.48` by the tenth,
-  against `3.07` before
-- The stabilisation parameters `Tsupg`, `Tlsic` and the element length along the
-  flow are evaluated at the field being solved rather than at the velocity of
-  the previous time step. The two are the same in a steady-state run; in a
-  transient one the old field is the velocity the step started from, held fixed
-  across every pass of that step, so the stabilisation lagged behind the flow it
-  was meant to stabilise
-
-#### Magnetostatic solver
-
-- **RSolverMagnetostatics** evaluates the magnetic field with the
-  **Biot-Savart law** instead of solving a field equation for it. It assembled
-  `laplace(B) = -u0 * curl(J)` for the three components of `B` with no boundary
-  condition of any kind, so the matrix had a null space of uniform fields and
-  every model was singular: the solve completed, and the level of the field it
-  returned was set by the iteration rather than by the physics. In free space
-  the field of a current is fixed by the current alone, and the condition that
-  it vanishes far away is part of the Biot-Savart integral, so there is no
-  boundary to close and no system to solve
-- The current density the electro-statics task stores is constant per element,
-  and every element type that carries it is flat-sided, so the integral over an
-  element has a closed form. A tetrahedron is reduced to its four faces by the
-  gradient theorem, and the integral of `1/R` over each face is a logarithm per
-  edge and the solid angle of the face. A triangle of a surface entity is a sheet
-  current `J * thickness` with the same edge logarithms and solid angle, a
-  quadrilateral is split into two triangles, and a two-node line segment is a
-  straight wire carrying `J * cross area`, whose field is the classic closed form
-- Elements far from the field point do not need the closed form. Beyond twice
-  the longest edge of the element a degree-two rule is used - three points on a
-  triangle, four on a tetrahedron - and beyond six times the midpoint rule. The
-  error against the closed form summed over a whole conductor stays below `1e-4`
-  of the peak field at every node
-- The field of a volume current is continuous, and a node on the surface of a
-  conductor gets the surface field. A line or surface entity is a conductor of
-  zero section whose field is singular at the conductor; at a node on one the
-  solver returns a regularised value - a segment contributes nothing to a point
-  on its own line, and the edge logarithm of a sheet is left out at a node on
-  that edge
-- **Surface and line entities carry current.** The old assembly looped over
-  volume entities only
-- **Every node receives a field.** A node of a surface, line or point entity used
-  to be counted among the unknowns and given no matrix entry, leaving a zero
-  diagonal the Jacobi preconditioner carried along unsolved. There are no
-  unknowns now, and a mesh around the conductor that carries no current shows
-  the field in the space around it
-- The current density is used per element as stored. It used to be averaged onto
-  the nodes and interpolated back to the integration points, which smeared it
-  across the edge of the conductor
-- Elements whose current density is below `1e-10` of the largest are skipped, so
-  a poorly conducting region next to a good conductor - air beside copper - does
-  not add a source per element and nothing measurable to the field. When no
-  element carries a current, the log says so and the field is zero
-- The work grows as the number of nodes times the number of current carrying
-  elements. The nodes are processed in parallel blocks of 64, so that each source
-  element is read from memory once per block rather than once per node; on a
-  model of `120 000` tetrahedra and `24 000` nodes that took the evaluation from
-  about 6.4 to 2.2 seconds with midpoint rules alone, and the complete run takes
-  about five seconds on 14 threads
-- The matrix solver setup is not used, and `assemblyMatrix()` is gone. The vacuum
-  permeability `RSolverGeneric::u0` is used as before
-- The field is that of the modelled current only. An electro-static model whose
-  current enters and leaves the body at its electrodes has an open current path,
-  and the field of the leads that would close it is not included
-- Unit tests in `tst_solver_magnetostatics` check the closed forms against
-  high-order Gauss-Legendre quadrature, the continuity of the field at the
-  vertices, edges and faces of a tetrahedron, the jump across a current sheet,
-  the quadrature rules against the closed form over a whole bar, the field of a
-  bar near and far against direct integration and the finite wire formula, a
-  wire and a strip, and an electro-statics task driving a magnetostatics one
-
-#### Conjugate heat transfer at fluid walls
-
-- The **Forced convection** condition on a wall between a meshed solid and a
-  meshed fluid couples **RSolverHeat** and **RSolverFluidHeat** directly instead
-  of feeding the fluid state into the flat plate correlation. The correlation
-  needs a free-stream velocity and a bulk temperature. What it got was the
-  average over the fluid element behind the wall, three of whose four nodes lie
-  on the wall - where a no-slip flow is at rest and the temperature is the
-  solid's. The velocity came out as a fraction of the one off-wall node, or
-  exactly zero where that node sat on another wall, and the wall was then left
-  unconvected. The fluid temperature was pulled towards the wall temperature
-  the same way
-- **RSolverFluidHeat** holds the wall nodes at the temperature the heat solver
-  computed in the solid, once it has run, and publishes for every wall element
-  a heat transfer coefficient and a reference temperature. The coefficient is
-  `k * G`, the conductance of the first fluid element - with `G` the sum of the
-  shape function derivatives of its off-wall nodes along the wall normal, which
-  is the reciprocal of the element height for a tetrahedron. The reference
-  temperature makes the pair reproduce the heat entering the fluid at the wall
-  nodes, taken as the residual of the fluid system there. That is the flux a
-  single solve of both domains would see, where the gradient of the first
-  element is only first order accurate in a thin boundary layer - it missed the
-  interface temperature of the unit test by 1.5 K
-- Before the first heat solve the wall is insulated and the reference
-  temperature is the gradient weighted temperature of the off-wall nodes
-- **RSolverHeat** applies the pair as it would a *Simple convection* condition.
-  The correlation, and with it the configured *Fluid temperature* and
-  *Velocity*, is used only on elements no fluid heat result covers - a surface
-  bordering no meshed fluid, or the first pass of a coupled run. The log says
-  per entity which of the two is in use, and for how many of its elements
-- The wall temperature handed to the fluid solve is relaxed with the **Aitken**
-  factor of the last two passes. Plain alternation contracts by
-  `(h - S) / (Ks + h)` per pass, with `h` the first element conductance, `S` the
-  conductance of the whole fluid and `Ks` that of the solid, which is close to
-  one for a poorly conducting solid against a well resolved fluid - the unit
-  test needs about 160 passes that way, and 5 with the relaxation. The factor is
-  bounded to `[-100, 100]` and starts over with every task run
-- Both solvers report the relative change `||dT|| / ||T||` of their temperature
-  field as their convergence while they are coupled, and remain unconditionally
-  converged otherwise, so a group holding only an uncoupled heat task still ends
-  after one iteration. **RSolverFluidHeat** reports the relative change in its
-  convergence file too, instead of the difference of the field norms
-- The coupling data is shared under `RSolverFluidHeat::wallHeatTransferCoefficientKey`,
-  `RSolverFluidHeat::wallFluidTemperatureKey` and
-  `RSolverHeat::solidNodeTemperatureKey`, in SI units, so the two solvers may use
-  scales of their own. `RSolverFluidHeat::fluidNodeTemperatureKey`,
-  `RSolverFluidHeat::fluidNodeVelocityKey`, `RSolverHeat::findFluidTemperature()`,
-  `RSolverHeat::findFluidVelocity()` and `RSolverHeat::findFluidElements()` are
-  gone; the pairing of walls with fluid elements moved to
-  **RSolverFluidHeat::findWallElements()**, and only walls carrying the *Forced
-  convection* condition are paired
-- **RSolverHeat** solves **solids only**. Its `findComputableElements()` drops
-  every volume whose material **RMaterial::isFluid()** reports as a fluid,
-  whatever properties or conditions it carries - a fluid carrying an emissivity,
-  as the mercury of the material database does, used to be conducted through
-  as a solid, overwriting the temperature the fluid heat solver computed. A
-  point, line or surface element made computable by a condition rather than by
-  a solid material of its own is dropped too where all its nodes touch the
-  fluid and not all touch the solid - an inlet or an outlet - since nothing
-  would connect it to the solid. A condition on it which the fluid heat solver
-  does not read is reported
-- Unit tests in `tst_solver_heat_coupling` check that a heat task leaves a fluid
-  carrying every heat property untouched, the parabola of a uniformly heated
-  fluid at rest, and the interface temperature of a solid slab against a fluid
-  slab - at rest, and with the fluid flowing towards the wall at a Peclet number
-  of 7 - against the closed form, within ten coupled passes
-
-### Bug fixes
-
-#### Fluid heat conduction sign
-
-- **RSolverFluidHeat** assembles the conduction term with the same sign as the
-  advection term. The element matrix held `+rho*c*v.grad(T)` next to
-  `-k*grad(N).grad(N)`, which is the equation of the flow running the other way
-  round: the heat was carried upstream, and a *Heat* source cooled the fluid
-  instead of heating it. A fluid at rest with no source has the same solution
-  either way, which is why a pure conduction check never showed it
-
-#### Electrostatic result recovery
-
-- **RSolverElectrostatics** recovers the electric field as a density. The shape
-  function derivatives averaged over the integration points in `process()` were
-  weighted by the Jacobian determinant of the element, which `RSolverHeat` had
-  already been corrected not to do, and on a surface the nodal sum was
-  multiplied by the surface thickness as well. Both are measures of the element
-  rather than of the field, so the recovered gradient scaled with the size of
-  the element it was computed in
-- Everything built on that gradient inherited the factor: the electric field,
-  the current density, the electric energy and the Joule heat all changed with
-  mesh refinement instead of converging, and none of their magnitudes was the
-  physical one. The nodal potential comes from the assembly rather than the
-  recovery and was never affected, and the electrical resistivity is `|E|/|J|`,
-  whose two factors cancel
-- The thickness and the cross area remain in the stiffness, where they carry the
-  section of a surface or line entity, and the `getThickness() > 0` and
-  `getCrossArea() > 0` guards still skip an entity which cannot conduct
-
-#### Charge density sign
-
-- The **Charge density** source is assembled with a positive sign on every
-  element type. Integrating `div(e0*er*grad(V)) = -rho` by parts leaves the
-  charge on the right hand side positively, which is what the point element loop
-  did; the line, surface and volume loops subtracted it instead
-- A positive space charge therefore lowered the potential around it on a meshed
-  body, and a point charge behaved the other way round from a volume charge of
-  the same value. A model driven only by prescribed potentials has no source
-  term and was not affected
-
-#### Joule heat
-
-- The Joule heat stored for each element is the dissipation density
-  `sigma*|E|^2` in `W/m^3`. `RSolverHeat` and `RSolverFluidHeat` add the value
-  to their source term and integrate it over the element, so a density is what
-  they expect; the value carried a characteristic element size on top of it -
-  the element length for a line, `2/SUM|s.B|` along the field for a surface or a
-  volume - and the power delivered to a resistive heating chain depended on the
-  mesh
-- The characteristic length computation, and the unit vector along the field it
-  needed, are gone with it
-- The dimensional scale **RScales** carries for the Joule heat follows, from
-  `kg*m^2/s^3` to `kg/(m*s^3)`. Nothing reads it - only the temperature and the
-  particle concentration scale factors are consumed - but the table describes
-  the variable and now describes it correctly
-
 ## Version 1.2.0
 
 ### Improvements
 
-- **RSolverAcoustic:** the solver is functional again and is no longer flagged
-  as *NOT WORKING*.
-  - Added a frequency domain (harmonic) analysis driven by **RAcousticSetup**.
-    The complex Helmholtz system is solved as an equivalent real block system
-    of twice the size, producing one result record per swept frequency.
-  - The absorbing boundary is now assembled as a boundary damping matrix
-    derived from the boundary condition absorption coefficient instead of being
-    patched onto the solution after the solve, and a new **Acoustic impedance**
-    boundary condition assembles the same term from a specific impedance.
-  - Bulk attenuation is supported through the new **Acoustic damping factor**
-    material property, and the speed of sound may now be given directly instead
-    of being derived from the modulus of elasticity and the density.
-  - Results were extended with the sound pressure level, the acoustic
-    intensity, the acoustic phase and the imaginary part of the velocity
-    potential.
-  - Point entities now contribute their lumped boundary terms; previously they
-    were silently skipped because point elements carry no integration points.
-  - Density and either a speed of sound or a modulus of elasticity are enough
-    to make an element computable; the two stiffness sources are alternatives,
-    not both required.
-- **RSolver::run():** a harmonic acoustic analysis is no longer driven by the
-  time loop. The time solver setup is left untouched, so switching back to a
-  transient analysis does not lose it.
-- **RSolverGeneric::run():** added a frequency sweep branch for harmonic
-  acoustics, mirroring the existing modal analysis branch. `writeResults()`
-  writes one record per frequency, independent of the time solver output
-  frequency.
-- **RSolverGeneric::findComputableElements()** is now virtual so that a solver
-  can define its own rule for which material properties an element needs.
-- Added **tst_solver_acoustic**, which verifies the solver against the closed
-  form plane wave and standing wave solutions of a one dimensional duct.
-- Added **doc/acoustic_theory_manual.md**, covering the formulation, the
-  acoustic parts of the user interface and two worked tutorials.
-- **RSolverStress:** the individual stress components are stored as results, in
-  global coordinates for volume elements and in the local element frame for
-  surface and line elements.
-- **RSolverGeneric::generateVariableVector():** a condition component which is
-  switched off no longer prescribes a value. This makes the optional components
-  of the *Displacement* boundary condition work, so a support can hold one
-  global direction and leave the others free.
-- Added **tst_solver_stress** and **tst_eigen_value_solver**, which verify the
-  static bar solution, the von Mises invariant against the stored stress
-  components, the axial modes of a fixed-free bar against `c/(4*L)`, the eigen
-  values of a small system against their closed form, that an entered local
-  direction changes which degree of freedom a roller restrains, that a
-  roller adds a reaction only along the direction it restrains, that constraints
-  from two entities combine on a shared node and carry their prescribed value
-  into the node frame, and that contradicting constraints are reported.
-- **REigenValueSolver:** the multiple mode method was replaced by **subspace
-  iteration** with a Rayleigh-Ritz projection, and the dominant mode method by
-  an **inverse power iteration** with a Rayleigh quotient. Both converge towards
-  the lowest eigen values and return `lambda` of `K*phi = lambda*M*phi`
-  directly. The projected eigenproblem is reduced with a Cholesky decomposition
-  of the projected mass matrix and solved with the cyclic Jacobi method. The
-  `Arnoldi` and `Rayleigh` methods of **REigenValueSolverConf** were renamed to
-  `SubspaceIteration` and `InversePowerIteration` accordingly.
-- **RSolverStress:** displacement constraints are now resolved per node instead
-  of per boundary condition. **RSolverStress::generateLocalConstraints()**
-  collects every constraint acting on a node - each of them a statement
-  `d . u = v` about one direction - and reduces the collection to at most three
-  mutually perpendicular held directions by Gram-Schmidt, carrying the
-  prescribed values through the same operations. The held directions become the
-  leading axes of the node frame, held in the new `nodeConstrainedDirections`
-  and `nodePrescribedDisplacement` members, and whatever is left completes the
-  frame and stays free. Consequences:
-  - Constraints from different entities meeting at one node combine. A face may
-    be held in a global direction by *Displacement* and rolled on a tilted plane
-    by *Roller displacement* at the same time; previously the later condition
-    overwrote the frame of the earlier one, and a globally phrased component was
-    then read in somebody else's local frame.
-  - A prescribed value is applied in the frame it was given in, so a
-    *Normal displacement* or a *Roller displacement* with a non-zero value now
-    moves the node by that amount along its own direction.
-  - Two entities which prescribe different values in the same direction are
-    reported as a conflict naming the node, instead of being resolved in favour
-    of whichever was read last.
-  - **RSolverGeneric::updateLocalRotations()** became virtual; the structural
-    solver overrides it, because its frames come from the constraints rather
-    than from the geometry of a single boundary condition.
+#### Fluid solver convergence and iteration
 
-- **RSolverGeneric::generateHeatVector()** and
-  **RSolverGeneric::findElementGroupMeasure()** new. The *Heat* boundary
-  condition prescribes the total heat input in `[W]` for the whole entity, so
-  the total is now spread over the measure of the entity it is applied to - the
-  volume, area or length of its computable elements, or their count on a point -
-  giving the source density the assembly integrates. See the bug fix below.
-- **RSolverHeat:** the *Forced convection* boundary condition is coupled to the
-  fluid heat solver.
-  - **RSolverHeat::findFluidElements()** pairs every surface element with the
-    volume element on its fluid side, a fluid being an element group whose
-    material carries the properties **R_PROBLEM_FLUID_HEAT** requires.
-  - **RSolverHeat::findFluidTemperature()** and
-    **RSolverHeat::findFluidVelocity()** read the bulk temperature and the mean
-    speed of that element from the fluid heat solver results. The values
-    configured on the condition are used only where no such result covers the
-    surface - a model with no fluid domain, or the first pass of a coupled run -
-    and the log says which of the two sources is in use.
-  - A velocity of zero the fluid solver computed disables the wall for that pass
-    with a warning, rather than falling back to a value the flow contradicts.
-  - **RSolverHeat::getForcedConvection()** became a per element call, because
-    both quantities vary along the wall.
-- **RSolverFluidHeat::storeSharedData()** publishes the solved node temperature
-  and the node velocity magnitude under keys of their own. The shared element
-  temperature will not do - the heat solve overwrites it over the whole mesh.
-- **RSolverHeat::checkConvectionInput()** new. A value configured on a
-  correlated convection condition which would leave the correlation with nothing
-  to work with now stops the solver, naming the component and the entity,
-  instead of being papered over by the division guards of **RConvection** and
-  yielding `h = 0` on a surface that never cools. The dimensionless groups
-  divide by the dynamic viscosity, the thermal conductivity and the hydraulic
-  diameter, and a zero density, heat capacity or mean velocity collapses them
-  just as surely.
+- **RSolverFluid** now reports convergence; `hasConverged()` used to always
+  answer no, so a task group with a flow task ran its full iteration count.
+  Both of these must hold:
+  - the relative Newton increment `||dv|| / ||v||` and `||dp|| / ||p||`
+    (logged as `Convergence-V` / `Convergence-P`) is below the task group
+    convergence value
+  - the residual has fallen to a tenth of its value at the first pass of the
+    same solve (each time step is a solve). This catches nearly singular
+    systems - no pressure reference, or a mesh too coarse for the Reynolds
+    number - which take tiny steps without converging. The tenth is fixed, so
+    a loose convergence value cannot disable it; a slowly converging model may
+    run its full iteration count, as before. Ratio and target are logged
+- The increments replace the signed difference of field norms, which was
+  neither positive nor dimensionless. Both norms are taken inside the
+  downscaling bracket, so no scale factor is needed and the separate pass over
+  the nodes is gone. The convergence graph now falls monotonically
+- At least two passes are taken before convergence is reported, so a field
+  that has not moved yet (no inflow, first assembly) is not taken as converged.
+  The log prints the group target and marks the iteration that reached it
+- **RSolverGeneric::run()** takes the task group convergence value as a third
+  argument, passed down by **RSolver::runProblemTask()**
+- **RSolverFluid** damps its step as `x += omega * dx`, since its matrix is not
+  the exact derivative of the residual. `omega` starts at `1` each solve, is
+  halved (floor `0.1`) after a pass that raises the residual by more than
+  2 % and grows by a quarter after one that lowers it; it is logged as
+  `Relaxation`. A run that never overshoots behaves as before. The 2 %
+  tolerance avoids stalling on the normal pass-to-pass wander (without it, and
+  a `0.01` floor, a run settled at residual ratio `0.48` instead of `0.17`).
+  On the reference transient model the residual of the first step, which used
+  to climb `2.79`, `3.05`, `3.07`, now retreats to `omega = 0.5` on the second
+  pass and descends to `2.48` by the tenth (`3.07` before)
+- The residual is computed once per pass in `updateResidualAndRelaxation()` and
+  reused by the convergence test and statistics
+- `Tsupg`, `Tlsic` and the element length along the flow are evaluated at the
+  field being solved rather than at the previous time step velocity, so in
+  transient runs the stabilisation no longer lags behind the flow
+
+#### Fluid Jacobian verification
+
+- **RSolverFluid::verifyJacobian()**, enabled by `--verify-jacobian` on the
+  solver command line, compares the assembled matrix with a central finite
+  difference of the residual (the exact Newton matrix is `-db/dx`, since the
+  solver applies `x += dx` from `A*dx = b`). It runs once and reassembles the
+  system twice per unknown, so it is meant for meshes of a few elements
+- It reports, per block (velocity/velocity, velocity/pressure,
+  pressure/velocity, pressure/pressure), the min, median and max ratio of
+  assembled to measured entries, grouped so that distinct factors and their
+  entry counts stand out, plus the largest disagreement with its node and
+  component. A ratio of `1` throughout means the block is correct
+- During the sweep the stabilisation parameters, element length, pass counter
+  and mesh-changed flag are frozen (the matrix carries no derivative of them,
+  and reassembly must not rebuild or resize the system), while the nodal
+  acceleration is refreshed for each perturbed assembly (`prepare()` does not
+  recompute it, which would drop the whole time-derivative term)
+- The difference step is about the cube root of machine epsilon. At `1.0e-7`
+  cancellation made the pressure/pressure block of a model at rest read `1.025`;
+  it now reads `1`
+
+#### Fluid Jacobian defects - diagnosed, not applied
+
+The check shows four fluid matrix terms that are not the derivative of the
+residual. Each correction was written, verified with the check and measured;
+**none is applied**, because each makes the iteration worse in practice:
+
+- **Viscous coefficient:** the matrix carries `ro * u`, the residual `u`. On a
+  steady model at rest the velocity/velocity block reads exactly `1e+06` (the
+  density in solver units) - for water the matrix is a million times too stiff
+  in the viscous directions, which is why steady-state models crawl
+- **Mass terms:** the matrix uses a consistent mass `ro*iNiN` and consistent
+  SUPG mass, the residual a lumped one (`mvScale*ax[m]`, `ctvScale*ax[m]`)
+- **PSPG acceleration term:** the same mismatch in `bteScale`
+- **Theta weighting:** the matrix scales spatial terms by `alpha*dt`, the
+  residual by `dt`, so under the default central difference march the
+  velocity/velocity block reads `0.5`
+
+With all four corrected every block reads `1` (bar convective linearisation
+scatter), yet:
+
+| configuration | steady-state | reference transient step, 10 passes |
+|---|---|---|
+| **as shipped** | monotone, no rise in 498 passes | `3.03` |
+| viscous and mass corrected | **oscillates - 119 rises in 258 passes**, residual up 75 % on the second pass | `0.557` |
+| plus the theta correction | - | `1.96` |
+| plus the PSPG mass correction | - | `155`, climbing |
+
+The corrected Jacobian is much softer and the first Newton step overshoots by
+three quarters. Slower relaxation growth (`1.05`, `1.02`) made it worse, and a
+backtracking line search cost more passes than it saved. The system is
+convection dominated with an indefinite true Jacobian, so the wrong terms act
+as stabilisation: **a more exact Jacobian is not automatically a better
+iteration matrix here.** Applying the corrections needs a residual line search
+cheap enough to try several step lengths per pass, which the current structure
+cannot do since the residual is only available from a full `prepare()`.
+
+Separately, the general (non-tetrahedral) path writes its mass as
+`me[m][m] = ro*N[m]*N[n]` inside the `n` loop, so the last `n` wins: hexahedral
+transient models assemble a meaningless mass matrix. Tetrahedral models are
+unaffected.
+
+#### Magnetostatic solver
+
+- **RSolverMagnetostatics** evaluates the field by the **Biot-Savart law**
+  instead of assembling `laplace(B) = -u0 * curl(J)`, which had no boundary
+  condition, so every model was singular and the field level was set by the
+  iteration rather than the physics. There is now no system to solve:
+  `assemblyMatrix()` and the matrix solver setup are gone; `RSolverGeneric::u0`
+  is used as before
+- The per-element constant current density is integrated in closed form:
+  tetrahedra reduce to their faces by the gradient theorem (edge logarithms
+  plus face solid angle), surface triangles are sheet currents
+  `J * thickness`, quadrilaterals are split into two triangles, and two-node
+  segments are straight wires carrying `J * cross area`. Beyond twice the
+  longest element edge a degree-two rule is used (3 points on a triangle, 4 on
+  a tetrahedron), beyond six times the midpoint rule; the error summed over a
+  conductor stays below `1e-4` of the peak field at every node
+- Nodes on a volume conductor surface get the (continuous) surface field. On a
+  line or surface conductor, where the field is singular, a regularised value
+  is returned: a segment contributes nothing on its own line, and a sheet's
+  edge logarithm is omitted at nodes on that edge
+- **Surface and line entities now carry current** (previously volumes only),
+  and **every node receives a field**, including nodes of surface, line and
+  point entities (previously unknowns with a zero diagonal) and of a mesh
+  around the conductor carrying no current
+- Current density is used per element as stored instead of being averaged to
+  nodes and interpolated back, which smeared it across conductor edges.
+  Elements below `1e-10` of the largest current density (e.g. air beside
+  copper) are skipped; with no current the log says so and the field is zero
+- Cost is nodes times current-carrying elements; nodes are processed in
+  parallel blocks of 64 so each source element is read once per block. On
+  `120 000` tetrahedra and `24 000` nodes the evaluation dropped from about 6.4
+  to 2.2 s (midpoint rules only) and the full run takes about 5 s on 14 threads
+- Only the modelled current contributes: the leads closing an open current path
+  between electrodes of an electrostatic model are not included
+- Unit tests in `tst_solver_magnetostatics` check the closed forms against
+  high-order Gauss-Legendre quadrature, field continuity at tetrahedron
+  vertices, edges and faces, the jump across a current sheet, the quadrature
+  rules against the closed form over a bar, a bar near and far against direct
+  integration and the finite wire formula, a wire, a strip, and an
+  electrostatics task driving a magnetostatics one
+
+#### Conjugate heat transfer at fluid walls
+
+- *Forced convection* on a wall between a meshed solid and a meshed fluid now
+  couples **RSolverHeat** and **RSolverFluidHeat** directly instead of feeding
+  the flat plate correlation an average of the fluid element behind the wall,
+  most of whose nodes lie on the wall: the velocity came out as a fraction of
+  the off-wall node (zero where it sat on another wall, leaving the wall
+  unconvected) and the fluid temperature was pulled towards the wall's
+- **RSolverFluidHeat** holds the wall nodes at the solid temperature from the
+  heat solver (insulated before the first heat solve) and publishes per wall
+  element a heat transfer coefficient `k * G` - the first fluid element
+  conductance, `G` being the sum of the off-wall node shape function
+  derivatives along the wall normal (the reciprocal element height for a
+  tetrahedron) - and a reference temperature reproducing the heat entering the
+  fluid at the wall nodes, taken from the fluid system residual. Using the first
+  element gradient instead missed the unit test interface temperature by 1.5 K.
+  Before the first heat solve the reference temperature is the
+  gradient-weighted temperature of the off-wall nodes
+- **RSolverHeat** applies the pair as a *Simple convection* condition. The
+  correlation, with the configured *Fluid temperature* and *Velocity*, is used
+  only on elements no fluid heat result covers (no meshed fluid, or the first
+  coupled pass); the log reports per entity which is in use and on how many
+  elements
+- The wall temperature passed to the fluid is **Aitken** relaxed, bounded to
+  `[-100, 100]` and restarted each task run. Plain alternation contracts by
+  `(h - S) / (Ks + h)` per pass (`h` first element, `S` whole fluid, `Ks` solid
+  conductance), close to one for a poor conductor against a resolved fluid:
+  the unit test needs about 160 passes without relaxation and 5 with it
+- While coupled, both solvers report `||dT|| / ||T||` as convergence; otherwise
+  they stay unconditionally converged, so a group with only an uncoupled heat
+  task ends after one iteration. **RSolverFluidHeat** writes the relative change
+  to its convergence file instead of the difference of field norms
+- Coupling data is shared in SI units under
+  `RSolverFluidHeat::wallHeatTransferCoefficientKey`,
+  `RSolverFluidHeat::wallFluidTemperatureKey` and
+  `RSolverHeat::solidNodeTemperatureKey`. Wall pairing moved to
+  **RSolverFluidHeat::findWallElements()** and covers only walls with *Forced
+  convection*; `RSolverFluidHeat::fluidNodeTemperatureKey`,
+  `fluidNodeVelocityKey`, `RSolverHeat::findFluidTemperature()`,
+  `findFluidVelocity()` and `findFluidElements()` are gone.
+  **RSolverHeat::getForcedConvection()** is now per element
+- **RSolverHeat** solves **solids only**: `findComputableElements()` drops every
+  volume whose material **RMaterial::isFluid()** reports as fluid, whatever it
+  carries (mercury, carrying an emissivity, used to be conducted as a solid,
+  overwriting the fluid heat result). Point, line and surface elements made
+  computable only by a condition are dropped where all their nodes touch the
+  fluid and not all touch the solid (inlets, outlets); a condition on them the
+  fluid heat solver does not read is reported
+- **RSolverHeat::checkConvectionInput()** new: a correlated convection value
+  that leaves the correlation nothing to work with (zero dynamic viscosity,
+  thermal conductivity, hydraulic diameter, density, heat capacity or mean
+  velocity) stops the solver naming the component and entity, instead of
+  yielding `h = 0` through the **RConvection** division guards
+- **RSolverGeneric::generateHeatVector()** and **findElementGroupMeasure()** new,
+  spreading the *Heat* boundary condition total `[W]` over the volume, area,
+  length or point count of the entity's computable elements (see bug fixes)
+- Unit tests in `tst_solver_heat_coupling` check that a heat task leaves a fluid
+  carrying every heat property untouched, the parabola of a uniformly heated
+  fluid at rest, and the interface temperature of a solid slab against a fluid
+  slab - at rest and flowing towards the wall at Peclet number 7 - against the
+  closed form within ten coupled passes
+
+#### Acoustic solver
+
+- **RSolverAcoustic** is functional again and no longer flagged *NOT WORKING*:
+  - new frequency domain (harmonic) analysis driven by **RAcousticSetup**,
+    solving the complex Helmholtz system as a real block system of twice the
+    size, one result record per swept frequency
+  - the absorbing boundary is assembled as a boundary damping matrix from the
+    absorption coefficient instead of being patched onto the solution; the new
+    **Acoustic impedance** condition assembles the same term from a specific
+    impedance
+  - bulk attenuation via the new **Acoustic damping factor** material property;
+    the speed of sound may be given directly instead of being derived from
+    modulus of elasticity and density - density plus either one makes an
+    element computable
+  - new results: sound pressure level, acoustic intensity, acoustic phase and
+    imaginary velocity potential
+  - point entities contribute their lumped boundary terms (previously skipped,
+    having no integration points)
+- **RSolver::run()** no longer drives a harmonic acoustic analysis through the
+  time loop and leaves the time solver setup untouched
+- **RSolverGeneric::run()** has a frequency sweep branch for harmonic acoustics,
+  like the modal branch; `writeResults()` writes one record per frequency
+  regardless of the time solver output frequency
+- **RSolverGeneric::findComputableElements()** is now virtual, so a solver can
+  define which material properties an element needs
+- Added **tst_solver_acoustic** (closed form plane and standing waves in a 1D
+  duct) and **doc/acoustic_theory_manual.md** (formulation, user interface and
+  two tutorials)
+
+#### Stress and modal analysis
+
+- **REigenValueSolver** replaces the multiple mode method by **subspace
+  iteration** with Rayleigh-Ritz projection (projected problem reduced by
+  Cholesky of the projected mass and solved by cyclic Jacobi), and the dominant
+  mode method by **inverse power iteration** with a Rayleigh quotient. Both
+  converge to the lowest eigenvalues and return `lambda` of
+  `K*phi = lambda*M*phi` directly. **REigenValueSolverConf** `Arnoldi` and
+  `Rayleigh` renamed to `SubspaceIteration` and `InversePowerIteration`
+- **RSolverStress** resolves displacement constraints per node:
+  **generateLocalConstraints()** collects every constraint `d . u = v` on a node
+  and reduces them by Gram-Schmidt to at most three perpendicular held
+  directions with their prescribed values (new `nodeConstrainedDirections` and
+  `nodePrescribedDisplacement`); the remaining axes complete the frame and stay
+  free. As a result:
+  - constraints from different entities on one node combine (e.g. a global
+    *Displacement* plus a tilted *Roller displacement*) instead of the later
+    overwriting the earlier frame and global components being read in a
+    foreign local frame
+  - prescribed values apply in their own frame, so a non-zero *Normal* or
+    *Roller displacement* moves the node by that amount along its direction
+  - different values prescribed in the same direction are reported as a
+    conflict naming the node, instead of the last one read winning
+  - **RSolverGeneric::updateLocalRotations()** is virtual and overridden by the
+    stress solver, whose frames come from the constraints
+- **RSolverStress** stores individual stress components as results - global
+  coordinates for volumes, local element frame for surfaces and lines
+- **RSolverGeneric::generateVariableVector()**: a switched-off condition
+  component no longer prescribes a value, so *Displacement* can hold one global
+  direction and leave the others free
+- Added **tst_solver_stress** and **tst_eigen_value_solver**, verifying the
+  static bar, von Mises against the stored components, fixed-free bar axial
+  modes against `c/(4*L)`, eigenvalues of a small system against the closed
+  form, that an entered local direction selects the degree of freedom a roller
+  restrains and the reaction is only along it, that constraints from two
+  entities combine on a shared node with their prescribed values, and that
+  contradicting constraints are reported
 
 ### Bug fixes
 
-- **RSolverHeat** and **RSolverFluidHeat:** the *Heat* boundary condition is
-  labelled `[W]`, but its value was handed to the assembly as a source density
-  and integrated over the element measure, so it acted as `W/m^3` on a volume,
-  `W/m^2` on a surface and `W/m` on a line. Only on a point did the label match.
-  The non-dimensionalisation scaled it as a total power as well, so the power
-  delivered also depended on the size of the model: a beam carrying `1000 W` on
-  a `0.01 m^2` face received `40 W`. The total is now spread over the entity and
-  the energy balance closes on the value entered.
-- **RSolverHeat::getForcedConvection():** the condition was created without a
-  *Fluid temperature* component while the solver demanded one, so any model
-  carrying it stopped with `Failed to find 'Fluid temperature' component in
-  'Forced convection' boundary condition`. The temperature now comes from the
-  fluid heat solver, with the new component as the fall-back.
-- **RSolverStress::assemblyMatrix():** the mass matrix of a modal analysis was
-  assembled from the element matrix before the local rotations were applied,
-  while the stiffness matrix was assembled after them. A mode shape of a model
-  carrying a local frame was therefore computed from a mismatched pair. The
-  rotated mass matrix is now used.
+#### Fluid heat
 
-- **RSolverStress:** the von Mises stress was reported as `QN + QS`, the sum of
-  the normal and the shear invariant, instead of `sqrt(QN^2 + QS^2)`. The
-  reported value was up to about 41 % too high. The two-dimensional shear
-  invariant of a surface element also kept the sign of the shear stress.
-- **RSolverStress:** the modal setup now holds the natural frequency in Hz,
-  converted as `sqrt(lambda)/(2*pi)`, instead of the raw eigen value, which is
-  what the 3D view and the report have always labelled it as. A mode the
-  iteration could not resolve is reported as zero with a warning in the log.
-- **RSolverStress:** the axial stress of a line element was reported as
-  `E*A*eps`, which is an axial force, instead of `E*(eps - alpha*dT)`. The
-  thermal part of the same expression carried a further factor of the cross
-  area.
-- **RSolverStress:** nodal forces were recovered as `M*a + K*u`, but the nodal
-  acceleration was only ever read back from a stored *Acceleration* result which
-  no solver writes and no condition supplies. The inert term and the dead
-  acceleration plumbing were removed - the reported force is the internal
-  elastic force `K*u`.
-- **RSolverStress::generateNodeBook():** a *Displacement* boundary condition
-  constrained all three degrees of freedom regardless of which of its components
-  were switched on.
-- **REigenValueSolver::solve():** the inversion and ascending sort that turn the
-  raw iteration values into the eigen values of `K*phi = lambda*M*phi` were
-  applied only when more than one value was extracted, so a single extracted
-  value came back on the reciprocal scale. Every method now returns `lambda`
-  directly and `solve()` only sorts.
-- **REigenValueSolver:** the extracted eigen values were wrong. On a two degree
-  of freedom system with known eigen values the old Arnoldi and QR iteration was
-  off by tens of percent and varied from run to run, and on a fixed-free bar the
-  reported fundamental was closer to the second mode. The dominant mode method
-  started its shift at `1e9 * rand()`, which drove it towards the highest modes
-  rather than the lowest. Both were replaced, see above. The axial modes of a
-  bar now come out within 0.5 % of `(2n+1)*c/(4*L)`.
-- **RSolverStress::prepare():** the stiffness matrix of a line element was
-  overwritten at every integration point instead of being accumulated, and was
-  never multiplied by the Jacobian determinant and the integration weight. A
-  truss came out far too stiff - by a factor of the element count on a uniform
-  bar. The thermal expansion force of the same element carried an extra factor
-  of the cross area and indexed the strain-displacement vector by the node
-  number instead of the degree of freedom.
-- **RSolverStress::applyLocalRotations():** the element load vector of a node
-  carrying a local frame was rotated with the transformation which maps local to
-  global, while the element matrix was rotated with its transpose. The solution
-  then satisfied equilibrium with a rotated load instead of the applied one, so
-  a roller support carrying a load - self weight, a traction, a thermal load -
-  came out wrong. It went unnoticed because the rotation matrix is symmetric
-  whenever the local direction is along a global axis, which is the usual case.
-- **RSolverGeneric::updateLocalRotations():** the local direction entered with a
-  *Normal displacement* or a *Roller displacement* was honoured on point
-  entities only - a surface always used its averaged element normals and a line
-  its element direction, silently ignoring what the user had entered. When the
-  boundary condition asks for its direction to be used, it is now applied to
-  surfaces and lines as well. A zero length direction is reported as an error
-  instead of producing a degenerate frame.
-- **RSolverStress::prepare():** *Force* and *Weight* assigned to a point entity
-  were applied in full at every one of its point elements. They are totals over
-  the entity, as they are for a line or a surface, and are now spread over its
-  points.
+- **RSolverFluidHeat** assembled conduction (`-k*grad(N).grad(N)`) with the
+  opposite sign to advection (`+rho*c*v.grad(T)`), i.e. the flow ran
+  backwards: heat was carried upstream and a *Heat* source cooled the fluid.
+  A fluid at rest without a source was unaffected
 
-- **RSolverAcoustic:** the mass matrix was assembled with a negative sign, so
-  the transient system matrix `K - a0*M` was indefinite and could not be solved
-  by the conjugate gradient method it was handed to.
-- **RSolverAcoustic:** the Newmark velocity and acceleration were recovered but
-  never stored, so the time integration state was reset to zero at the start of
-  every time step. Both are now published as results.
-- **RSolverAcoustic:** the Newmark predictor used the boundary condition values
-  of the current step instead of the state at the beginning of the step.
-- **RSolverAcoustic:** acoustic pressure is evaluated as `p = rho * dphi/dt`;
-  it used to be evaluated as `rho * phi`, which is dimensionally wrong.
-- **RSolverAcoustic:** the absorbing boundary normal search indexed the edge
-  element list with the global element index, reading out of bounds.
-- **RSolverAcoustic:** the particle velocity gradient was scaled by the element
-  Jacobian determinant and, for volume elements, only the last integration
-  point was used.
-- **RSolverAcoustic:** the prescribed velocity boundary condition picked up the
-  velocity component of unrelated boundary conditions, such as forced
-  convection.
-- **RSolverAcoustic:** a zero time-march approximation coefficient made the
-  Newmark coefficients divide by zero. The coefficient is now clamped to the
-  unconditionally stable average acceleration scheme.
-- **RSolverAcoustic:** a transient analysis without an enabled time solver used
-  to silently degenerate into a Laplace problem; it is now reported as an error.
-- **RSolverAcoustic:** the frequency domain solve widens the GMRES restart to
-  fit the system, within a fixed memory budget. The default restart of 10 made
-  the indefinite block system stagnate.
-- **RScales:** the velocity potential and its time derivatives were not scaled
-  with the mesh, and the acoustic particle velocity was scaled by `m*s` instead
-  of `m/s`.
+#### Electrostatics
+
+- **RSolverElectrostatics** recovered the field gradient in `process()` weighted
+  by the element Jacobian determinant (and, on surfaces, the thickness), so
+  electric field, current density, electric energy and Joule heat scaled with
+  element size and did not converge under refinement. The nodal potential and
+  the resistivity `|E|/|J|` were unaffected. Thickness and cross area remain in
+  the stiffness, and the `getThickness() > 0` / `getCrossArea() > 0` guards
+  still skip non-conducting entities
+- **Charge density** is assembled with a positive sign on every element type
+  (from `div(e0*er*grad(V)) = -rho`); line, surface and volume loops subtracted
+  it, so a positive charge lowered the potential and point and volume charges
+  acted oppositely. Models driven only by prescribed potentials were unaffected
+- Joule heat is stored as the dissipation density `sigma*|E|^2` in `W/m^3`, as
+  **RSolverHeat** and **RSolverFluidHeat** expect; it carried an extra
+  characteristic element length, making the power of a resistive heater mesh
+  dependent. The length computation is removed, and the (unused) **RScales**
+  dimension changed from `kg*m^2/s^3` to `kg/(m*s^3)`
+
+#### Heat
+
+- **RSolverHeat** and **RSolverFluidHeat**: the *Heat* boundary condition,
+  labelled `[W]`, acted as `W/m^3`, `W/m^2` or `W/m` on volumes, surfaces and
+  lines, and was scaled as a total power, so the delivered power depended on
+  model size (`1000 W` on a `0.01 m^2` face delivered `40 W`). The total is now
+  spread over the entity and the energy balance closes
+- **RSolverHeat::getForcedConvection()** demanded a *Fluid temperature*
+  component the condition was created without, so any model using *Forced
+  convection* stopped with an error. The component now exists and is the
+  fall-back where no fluid heat result covers the wall
+
+#### Stress and modal analysis
+
+- **RSolverStress**:
+  - von Mises was `QN + QS` instead of `sqrt(QN^2 + QS^2)` (up to about 41 %
+    too high); the 2D shear invariant of surface elements kept the shear sign
+  - modal frequencies are stored in Hz (`sqrt(lambda)/(2*pi)`) as the 3D view
+    and report label them, instead of the raw eigenvalue; an unresolved mode is
+    reported as zero with a warning
+  - line element axial stress was `E*A*eps` (a force) instead of
+    `E*(eps - alpha*dT)`, with an extra cross area factor on the thermal part
+  - nodal forces were `M*a + K*u` with an acceleration nothing ever wrote; the
+    dead term and plumbing are removed and the force is `K*u`
+  - `generateNodeBook()`: *Displacement* constrained all three degrees of
+    freedom regardless of which components were on
+  - `prepare()`: line element stiffness was overwritten at each integration
+    point and never multiplied by the Jacobian determinant and weight, making
+    trusses too stiff (by the element count on a uniform bar); its thermal
+    force had an extra cross area factor and indexed the strain-displacement
+    vector by node instead of degree of freedom
+  - `prepare()`: *Force* and *Weight* on a point entity were applied in full at
+    every point element; they are now spread over its points
+  - `assemblyMatrix()`: the modal mass matrix was assembled before local
+    rotations and the stiffness after; the rotated mass is now used
+  - `applyLocalRotations()`: the load vector at a local-frame node was rotated
+    with the transpose of the matrix rotation, so loaded rollers (self weight,
+    traction, thermal load) were wrong whenever the local direction was not
+    along a global axis
+- **RSolverGeneric::updateLocalRotations()**: an entered *Normal* or *Roller
+  displacement* direction was honoured only on points; surfaces and lines used
+  their geometry. It now applies to them when the condition asks for it, and a
+  zero length direction is an error
+- **REigenValueSolver**: eigenvalues were wrong - the old Arnoldi/QR iteration
+  was off by tens of percent and non-deterministic on a two-degree-of-freedom
+  system, and the dominant mode method's shift started at `1e9 * rand()`,
+  driving it to the highest modes. With the new methods bar axial modes are
+  within 0.5 % of `(2n+1)*c/(4*L)`. `solve()` inverted and sorted the values
+  only when more than one was extracted (a single value came back reciprocal);
+  methods now return `lambda` and `solve()` only sorts
+
+#### Acoustics
+
+- **RSolverAcoustic**:
+  - the mass matrix had a negative sign, making `K - a0*M` indefinite and
+    unsolvable by conjugate gradients
+  - Newmark velocity and acceleration were never stored, resetting the time
+    integration state every step; both are now results
+  - the Newmark predictor used current step boundary values instead of the
+    start-of-step state
+  - acoustic pressure is `p = rho * dphi/dt`, not `rho * phi`
+  - the absorbing boundary normal search indexed edge elements by global element
+    index, reading out of bounds
+  - the particle velocity gradient was scaled by the Jacobian determinant and,
+    for volumes, used only the last integration point
+  - prescribed velocity picked up velocity components of unrelated conditions
+    such as forced convection
+  - a zero time-march coefficient divided by zero; it is clamped to the
+    average acceleration scheme
+  - a transient analysis without an enabled time solver silently became a
+    Laplace problem; it is now an error
+  - the frequency domain GMRES restart (default 10, which stagnated) is widened
+    to fit the system within a fixed memory budget
+- **RScales**: velocity potential and its time derivatives were not scaled with
+  the mesh, and acoustic particle velocity was scaled by `m*s` instead of `m/s`
 
 ---
 
