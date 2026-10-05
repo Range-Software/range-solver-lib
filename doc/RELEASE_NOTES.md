@@ -282,6 +282,30 @@ unaffected.
   backwards: heat was carried upstream and a *Heat* source cooled the fluid.
   A fluid at rest without a source was unaffected
 
+#### Contaminant dispersion
+
+- **RSolverFluidParticle** blew up in transient runs: the concentration grew
+  far above the highest inflow value (`3326` against an inflow of `0.62` on
+  the tutorial channel model), first in recirculation zones. Causes, all fixed:
+  - a term `Tsupg * v.grad(N_m)` was added to every column of the matrix. It
+    is the SUPG weight of the source term, which belongs on the right-hand
+    side multiplied by the *Particle rate*; in the matrix it had the wrong
+    units, scaled with the time-step size and acted as a source in some rows
+    and a sink in others. The SUPG-weighted source is now on the right-hand
+    side
+  - the SUPG-weighted mass matrix `Tsupg * v.grad(N_m) * N_n` was declared but
+    never computed, so the transient SUPG formulation was inconsistent
+  - negative concentrations were clipped to zero after each solve. Every
+    clipped undershoot added contaminant that was then carried into the next
+    time step; the solution is no longer clipped
+- Diffusion was assembled as `-k*grad(N).grad(N)`, the same sign error as in
+  the fluid heat solver. Diffusion is still zero, so results were not affected
+- Wedge and hexahedral elements, which are integrated over several points
+  (linear tetrahedra are not), multiplied the matrix accumulated over previous integration
+  points by the weight of the current one, and a steady-state solve kept only
+  the source of the last integration point. Contributions are now weighted
+  and summed per integration point
+
 #### Electrostatics
 
 - **RSolverElectrostatics** recovered the field gradient in `process()` weighted

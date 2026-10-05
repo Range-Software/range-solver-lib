@@ -16,9 +16,8 @@ class FluidParticleMatrixContainer
         RRMatrix me;    // m
         RRMatrix ce;    // c
         RRMatrix ke;    // k
-        RRMatrix cte;   // c~
-        RRMatrix kte;   // k~
-        RRMatrix yte;   // y~
+        RRMatrix cte;   // c~ (SUPG weighted mass)
+        RRMatrix kte;   // k~ (SUPG streamline diffusion)
 
         // Element level vectors
         RRVector fv;    // f
@@ -38,7 +37,6 @@ class FluidParticleMatrixContainer
             this->ke.resize(nen,nen,0.0);
             this->cte.resize(nen,nen,0.0);
             this->kte.resize(nen,nen,0.0);
-            this->yte.resize(nen,nen,0.0);
 
             this->fv.resize(nen,0.0);
             this->vdiv.resize(nen,0.0);
@@ -53,7 +51,6 @@ class FluidParticleMatrixContainer
             this->ke.fill(0.0);
             this->cte.fill(0.0);
             this->kte.fill(0.0);
-            this->yte.fill(0.0);
 
             this->fv.fill(0.0);
             this->vdiv.fill(0.0);
@@ -287,7 +284,8 @@ void RSolverFluidParticle::solve()
         uint position = 0;
         if (this->nodeBook.getValue(i,position))
         {
-            this->nodeConcentration[i] = std::max(this->x[position],0.0);
+            // Not clipped to zero: clipping undershoots adds contaminant mass which accumulates over time-steps.
+            this->nodeConcentration[i] = this->x[position];
         }
     }
 
@@ -429,7 +427,6 @@ void RSolverFluidParticle::computeElementGeneral(unsigned int elementID, RRMatri
     RRMatrix &ke = matrixCotainer.ke;
     RRMatrix &cte = matrixCotainer.cte;
     RRMatrix &kte = matrixCotainer.kte;
-    RRMatrix &yte = matrixCotainer.yte;
 
     // Element level vectors
     RRVector &fv = matrixCotainer.fv;
@@ -456,7 +453,7 @@ void RSolverFluidParticle::computeElementGeneral(unsigned int elementID, RRMatri
 
         double integValue = detJ * shapeFunc.getW();
 
-        // velocity divergence
+        // advection operator (v . grad N)
         RRVector &vdiv = matrixCotainer.vdiv;
         vdiv.fill(0.0);
         // element length scale
@@ -485,26 +482,30 @@ void RSolverFluidParticle::computeElementGeneral(unsigned int elementID, RRMatri
             }
         }
 
+        // Particle rate at integration point
+        double fip = 0.0;
+        for (uint n=0;n<nen;n++)
+        {
+            fip += this->nodeRate[element.getNodeId(n)] * N[n];
+        }
+
         for (uint m=0;m<nen;m++)
         {
             for (uint n=0;n<nen;n++)
             {
                 // m matrix
-                if (unsteady)
-                {
-                    me[m][n] = ca * N[m] * N[n];
-                }
+                me[m][n] = unsteady ? ca * N[m] * N[n] : 0.0;
                 // c matrix
                 ce[m][n] = ca * N[m] * vdiv[n];
                 // k matrix
-                ke[m][n] = -k * (B[m][0] * B[n][0] + B[m][1] * B[n][1] + B[m][2] * B[n][2]);
+                ke[m][n] = k * (B[m][0] * B[n][0] + B[m][1] * B[n][1] + B[m][2] * B[n][2]);
+                // c~ matrix
+                cte[m][n] = unsteady ? Tsupg * ca * vdiv[m] * N[n] : 0.0;
                 // k~ matrix
                 kte[m][n] = Tsupg * ca * vdiv[m] * vdiv[n];
-                // y~ matrix
-                yte[m][n] = Tsupg * vdiv[m];
             }
-            // f vector
-            fv[m] = this->nodeRate[element.getNodeId(m)] * N[m];
+            // f vector (Galerkin + SUPG weighted source)
+            fv[m] = this->nodeRate[element.getNodeId(m)] * N[m] + Tsupg * vdiv[m] * fip;
         }
 
         // Assembly element level matrixes
@@ -514,37 +515,28 @@ void RSolverFluidParticle::computeElementGeneral(unsigned int elementID, RRMatri
             {
                 if (unsteady)
                 {
-                    Ae[m][n] += me[m][n] + cte[m][n]
-                              + alpha * dt * (  ce[m][n]  + ke[m][n]
-                                             + kte[m][n] + yte[m][n] );
+                    Ae[m][n] += integValue * (  me[m][n] + cte[m][n]
+                                              + alpha * dt * (ce[m][n] + ke[m][n] + kte[m][n]));
                 }
                 else
                 {
-                    Ae[m][n] += ce[m][n] + ke[m][n]
-                              + kte[m][n] + yte[m][n];
+                    Ae[m][n] += integValue * (ce[m][n] + ke[m][n] + kte[m][n]);
                 }
             }
             if (unsteady)
             {
-                be[m] += dt * fv[m];
+                be[m] += integValue * dt * fv[m];
                 for (uint n=0;n<nen;n++)
                 {
-                    be[m] += (me[m][n] + cte[m][n] - (1.0 - alpha) * dt * (ce[m][n] + ke[m][n] + kte[m][n] + yte[m][n]))
+                    be[m] += integValue
+                           * (me[m][n] + cte[m][n] - (1.0 - alpha) * dt * (ce[m][n] + ke[m][n] + kte[m][n]))
                            * this->nodeConcentration[element.getNodeId(n)];
                 }
             }
             else
             {
-                be[m] = fv[m];
+                be[m] += integValue * fv[m];
             }
-        }
-        for (uint m=0;m<nen;m++)
-        {
-            for (uint n=0;n<nen;n++)
-            {
-                Ae[m][n] *= integValue;
-            }
-            be[m] *= integValue;
         }
     }
 }
@@ -574,7 +566,6 @@ void RSolverFluidParticle::computeElementConstantDerivative(unsigned int element
     RRMatrix &ke = matrixCotainer.ke;
     RRMatrix &cte = matrixCotainer.cte;
     RRMatrix &kte = matrixCotainer.kte;
-    RRMatrix &yte = matrixCotainer.yte;
 
     // Element level vectors
     RRVector &fv = matrixCotainer.fv;
@@ -597,7 +588,7 @@ void RSolverFluidParticle::computeElementConstantDerivative(unsigned int element
     double wt = RElement::getTotalWeightFactor(element.getType());
     const RRMatrix &B = this->shapeDerivations[elementID]->getDerivative(0);
 
-    // velocity divergence
+    // advection operator (v . grad N)
     RRVector &vdiv = matrixCotainer.vdiv;
     vdiv.fill(0.0);
     // element length scale
@@ -626,26 +617,30 @@ void RSolverFluidParticle::computeElementConstantDerivative(unsigned int element
         }
     }
 
+    // Integral of particle rate over the element (reference coordinates)
+    double fInt = 0.0;
+    for (uint n=0;n<nen;n++)
+    {
+        fInt += this->nodeRate[element.getNodeId(n)] * iN[n];
+    }
+
     for (uint m=0;m<nen;m++)
     {
         for (uint n=0;n<nen;n++)
         {
             // m matrix
-            if (unsteady)
-            {
-                me[m][n] = ca * iNiN[m][n];
-            }
+            me[m][n] = unsteady ? ca * iNiN[m][n] : 0.0;
             // c matrix
             ce[m][n] = ca * iN[m] * vdiv[n];
             // k matrix
-            ke[m][n] = -k * wt * (B[m][0] * B[n][0] + B[m][1] * B[n][1] + B[m][2] * B[n][2]);
+            ke[m][n] = k * wt * (B[m][0] * B[n][0] + B[m][1] * B[n][1] + B[m][2] * B[n][2]);
+            // c~ matrix
+            cte[m][n] = unsteady ? Tsupg * ca * vdiv[m] * iN[n] : 0.0;
             // k~ matrix
             kte[m][n] = Tsupg * ca * vdiv[m] * vdiv[n] * wt;
-            // y~ matrix
-            yte[m][n] = Tsupg * vdiv[m] * wt;
         }
-        // f vector
-        fv[m] = this->nodeRate[element.getNodeId(m)] * iN[m];
+        // f vector (Galerkin + SUPG weighted source)
+        fv[m] = this->nodeRate[element.getNodeId(m)] * iN[m] + Tsupg * vdiv[m] * fInt;
     }
 
     // Assembly element level matrixes
@@ -656,13 +651,11 @@ void RSolverFluidParticle::computeElementConstantDerivative(unsigned int element
             if (unsteady)
             {
                 Ae[m][n] = me[m][n] + cte[m][n]
-                         + alpha * dt * (  ce[m][n]  + ke[m][n]
-                                         + kte[m][n] + yte[m][n] );
+                         + alpha * dt * (ce[m][n] + ke[m][n] + kte[m][n]);
             }
             else
             {
-                Ae[m][n] = ce[m][n] + ke[m][n]
-                         + kte[m][n] + yte[m][n];
+                Ae[m][n] = ce[m][n] + ke[m][n] + kte[m][n];
             }
         }
         if (unsteady)
@@ -670,7 +663,7 @@ void RSolverFluidParticle::computeElementConstantDerivative(unsigned int element
             be[m] = dt * fv[m];
             for (uint n=0;n<nen;n++)
             {
-                be[m] += (me[m][n] + cte[m][n] - (1.0 - alpha) * dt * (ce[m][n] + ke[m][n] + kte[m][n] + yte[m][n]))
+                be[m] += (me[m][n] + cte[m][n] - (1.0 - alpha) * dt * (ce[m][n] + ke[m][n] + kte[m][n]))
                        * this->nodeConcentration[element.getNodeId(n)];
             }
         }
