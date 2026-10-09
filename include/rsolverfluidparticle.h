@@ -37,6 +37,9 @@ class RSolverFluidParticle : public RSolverGeneric
         //! Element density.
         RRVector elementDiffusion;
 
+        //! Maximum saturation (scaled), zero if saturation is not limited.
+        double maximumSaturation;
+
         //! Concentration convergence.
         double cvgC;
 
@@ -69,6 +72,13 @@ class RSolverFluidParticle : public RSolverGeneric
 
         //! Generate node rate input vector.
         void generateNodeRateVector();
+
+        //! Return saturation reaction coefficient for given node.
+        //! Positive particle rate f is limited by saturation as f * (1 - c / cSat).
+        double computeNodeSaturationCoefficient(uint nodeID) const;
+
+        //! Warn if concentration exceeds maximum saturation.
+        void checkMaximumSaturation() const;
 
         //! Initialize solver.
         void initialize() override;

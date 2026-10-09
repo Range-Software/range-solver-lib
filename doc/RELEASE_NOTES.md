@@ -273,6 +273,48 @@ unaffected.
   entities combine on a shared node with their prescribed values, and that
   contradicting constraints are reported
 
+#### Contaminant dispersion
+
+- **RSolverFluidParticle** limits a positive *Particle rate* by the maximum
+  saturation `c_sat` of **RParticleSetup** as `f * (1 - c / c_sat)`, so
+  emission slows as the concentration approaches saturation and stops at it.
+  Sinks are not limited. The `c` part is implicit, a reaction term on the
+  matrix diagonal lumped like the source so the two cancel exactly at
+  saturation, and SUPG weighted like the source. Concentration is still solved
+  in `kg/m^3`; values imposed by boundary or initial conditions are not limited
+  and are reported with a warning when above saturation. SUPG may still over or
+  undershoot near steep fronts
+- **RSolverFluidParticle** stores *Relative saturation* `c / c_sat` when the
+  maximum saturation is set, and removes it when it is not
+- **RSolverFluidParticle** SUPG parameter is limited by the time step,
+  `tau = [(2/dt)^2 + (2|v|/h)^2 + 9(4k/h^2)^2]^(-1/2)` (Shakib, Tezduyar);
+  steady problems drop the `dt` term, and the factor 9 makes `tau` approach
+  `h^2/(12k)`, the limit of the nodally exact 1D parameter, when diffusion
+  dominates. It used to be `h/(2|v|)`, unbounded as
+  the element Courant number `|v|dt/h` drops, while the SUPG weighted mass term
+  kept full strength regardless of `|v|`. With no diffusion to damp it, slow
+  and recirculating regions grew spurious concentration ahead of the front.
+  Added **tst_solver_fluid_particle** covering saturation and a flow at Courant
+  number `~1e-5`, which deviated 100 % from the no flow solution before
+- **RSolverFluidParticle** diffusion implemented: `prepare()` takes the
+  diffusion coefficient of **RParticleSetup** (scaled as `m^2/s`) instead of
+  zero, completing `dc/dt + v.grad(c) - div(D grad(c)) = f`. Without a
+  turbulence model it serves as an effective diffusivity. Walls and outflow
+  keep the natural zero diffusive flux condition. Tests cover pure diffusion
+  (exact linear profile) and 1D advection-diffusion at `Pe = 1` and `Pe = 20`
+- **RSolverFluidParticle** assembles the Galerkin advection term in
+  skew-symmetric form, `N * ( v . grad(C) + 0.5 * div(v) * C )`, with the
+  continuous nodal velocity instead of the element velocity. The discrete flow
+  solution is not exactly divergence free, and advection with an element
+  velocity, whose normal component jumps across element faces, created energy.
+  The unlimited SUPG parameter used to hide this with artificial diffusion;
+  once `tau` was limited by the time step, transient runs with a small `dt`
+  grew exponentially (checkerboard concentration, residual rising). The face
+  contributions now cancel, so advection only moves the contaminant; for a
+  divergence free velocity the added term is zero. Added a test on a strongly
+  non-solenoidal flow, where the peak went from about 30 to about 1600 when the
+  run was doubled and now grows only with the injected mass
+
 ### Bug fixes
 
 #### Fluid heat

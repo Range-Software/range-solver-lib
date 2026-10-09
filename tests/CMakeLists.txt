@@ -16,6 +16,7 @@ set(range_solver_lib_tests
     tst_solver_stress
     tst_solver_magnetostatics
     tst_solver_heat_coupling
+    tst_solver_fluid_particle
     tst_eigen_value_solver
 )
 

@@ -161,6 +161,7 @@ double RScales::findScaleFactor(RVariableType variableType) const
         case R_VARIABLE_RELATIVE_PERMITTIVITY:
             return std::pow(this->second*this->ampere,2);
         case R_VARIABLE_POISSON_RATIO:
+        case R_VARIABLE_RELATIVE_SATURATION:
             return 1.0;
         // Velocity potential carries units of m^2/s.
         case R_VARIABLE_POTENTIAL:

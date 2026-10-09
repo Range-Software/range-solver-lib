@@ -18,10 +18,13 @@ class FluidParticleMatrixContainer
         RRMatrix ke;    // k
         RRMatrix cte;   // c~ (SUPG weighted mass)
         RRMatrix kte;   // k~ (SUPG streamline diffusion)
+        RRMatrix re;    // r (saturation limited source)
+        RRMatrix vb;    // v_k . grad(N_n) with nodal velocity v_k
 
         // Element level vectors
         RRVector fv;    // f
         RRVector vdiv;
+        RRVector sv;    // node saturation coefficients
 
     public:
 
@@ -37,9 +40,12 @@ class FluidParticleMatrixContainer
             this->ke.resize(nen,nen,0.0);
             this->cte.resize(nen,nen,0.0);
             this->kte.resize(nen,nen,0.0);
+            this->re.resize(nen,nen,0.0);
+            this->vb.resize(nen,nen,0.0);
 
             this->fv.resize(nen,0.0);
             this->vdiv.resize(nen,0.0);
+            this->sv.resize(nen,0.0);
 
             this->initialized = true;
         }
@@ -51,15 +57,48 @@ class FluidParticleMatrixContainer
             this->ke.fill(0.0);
             this->cte.fill(0.0);
             this->kte.fill(0.0);
+            this->re.fill(0.0);
+            this->vb.fill(0.0);
 
             this->fv.fill(0.0);
             this->vdiv.fill(0.0);
+            this->sv.fill(0.0);
         }
 };
+
+//! Compute SUPG stabilization parameter (Shakib, Tezduyar)
+//!   tau = [ (2/dt)^2 + (2|v|/h)^2 + C (4k/h^2)^2 ]^(-1/2), C = 9 for linear elements
+//! Time step term keeps tau <= dt/2. Without it tau = h/(2|v|) grows without bound as the element
+//! Courant number |v|dt/h drops, while the SUPG weighted mass term tau*(v.grad(N))*N stays at full
+//! strength regardless of |v|. In slow and recirculating flow this destabilizes the solution.
+//! Diffusion term with C = 9 gives tau -> h^2/(12k), the limit of the nodally exact 1D parameter
+//! (h/(2|v|)) * (coth(Pe) - 1/Pe), Pe = |v|h/(2k), when diffusion dominates.
+//! Zero time step size means steady problem.
+static double computeSupgParameter(double h, double mvh, double k, double dt)
+{
+    if (mvh <= 0.0 || h <= 0.0)
+    {
+        // No streamline direction - no streamline upwinding.
+        return 0.0;
+    }
+
+    double tauInv2 = std::pow(2.0 * mvh / h, 2);
+    if (dt > 0.0)
+    {
+        tauInv2 += std::pow(2.0 / dt, 2);
+    }
+    if (k > 0.0)
+    {
+        tauInv2 += 9.0 * std::pow(4.0 * k / (h * h), 2);
+    }
+
+    return 1.0 / std::sqrt(tauInv2);
+}
 
 RSolverFluidParticle::RSolverFluidParticle(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
     , streamVelocity(1.0)
+    , maximumSaturation(0.0)
     , cvgC(0.0)
     , statsCounter(0)
     , statsOldResidual(0.0)
@@ -84,6 +123,50 @@ void RSolverFluidParticle::generateNodeRateVector()
 
     this->nodeRate.fill(0.0); // Particle rate on node is meant as an input - needs to be cleared
     this->pModel->convertElementToNodeVector(this->elementRate,rateSetValues,this->nodeRate,true);
+}
+
+double RSolverFluidParticle::computeNodeSaturationCoefficient(uint nodeID) const
+{
+    // Only emission (positive rate) is limited - a sink must keep removing contaminant regardless of saturation.
+    if (this->maximumSaturation <= 0.0 || this->nodeRate[nodeID] <= 0.0)
+    {
+        return 0.0;
+    }
+    return this->nodeRate[nodeID] / this->maximumSaturation;
+}
+
+void RSolverFluidParticle::checkMaximumSaturation() const
+{
+    if (this->maximumSaturation <= 0.0)
+    {
+        return;
+    }
+
+    uint nExceeded = 0;
+    double cMax = 0.0;
+    for (uint i=0;i<this->nodeConcentration.size();i++)
+    {
+        // Check only prescribed values - boundary conditions and on the first run also initial conditions.
+        uint position = 0;
+        if (!this->firstRun && this->nodeBook.getValue(i,position))
+        {
+            continue;
+        }
+        if (this->nodeConcentration[i] > this->maximumSaturation)
+        {
+            nExceeded++;
+            cMax = std::max(cMax,this->nodeConcentration[i]);
+        }
+    }
+
+    if (nExceeded > 0)
+    {
+        double scale = this->scales.findScaleFactor(R_VARIABLE_PARTICLE_CONCENTRATION);
+        RLogger::warning("Prescribed particle concentration on %u nodes exceeds maximum saturation (%g > %g [kg/m^3]).\n",
+                         nExceeded,
+                         cMax/scale,
+                         this->maximumSaturation/scale);
+    }
 }
 
 void RSolverFluidParticle::initialize()
@@ -134,12 +217,24 @@ void RSolverFluidParticle::prepare()
 
     this->generateVariableVector(R_VARIABLE_PARTICLE_CONCENTRATION,this->elementConcentration,concentrationSetValues,true,this->firstRun,this->firstRun);
     this->generateMaterialVecor(RMaterialProperty::Density,this->elementDensity);
+    // Model is downscaled at this point - diffusion coefficient [m^2/s] must be scaled as well.
+    double diffusionCoefficient = std::max(this->pModel->getProblemSetup().getParticleSetup().getDiffusionCoefficient(),0.0)
+                                * std::pow(this->scales.getMetre(),2) / this->scales.getSecond();
     this->elementDiffusion.resize(this->pModel->getNElements());
-    this->elementDiffusion.fill(0.0); // TODO: Diffusion not yet implemented
+    this->elementDiffusion.fill(diffusionCoefficient);
 
     this->generateNodeRateVector();
 
+    // Model is downscaled at this point - saturation must be scaled same as concentration.
+    this->maximumSaturation = std::max(this->pModel->getProblemSetup().getParticleSetup().getMaximumSaturation(),0.0)
+                            * this->scales.findScaleFactor(R_VARIABLE_PARTICLE_CONCENTRATION);
+
     this->pModel->convertElementToNodeVector(this->elementConcentration,concentrationSetValues,this->nodeConcentration,true);
+
+    if (this->taskIteration == 0)
+    {
+        this->checkMaximumSaturation();
+    }
 
     this->pModel->convertNodeToElementVector(this->nodeVelocity.x,this->elementVelocity.x);
     this->pModel->convertNodeToElementVector(this->nodeVelocity.y,this->elementVelocity.y);
@@ -327,6 +422,31 @@ void RSolverFluidParticle::store()
         concentration.setValue(0,i,this->nodeConcentration[i]);
     }
 
+    // Relative saturation
+    uint relativeSaturationPos = this->pModel->findVariable(R_VARIABLE_RELATIVE_SATURATION);
+    if (this->maximumSaturation > 0.0)
+    {
+        if (relativeSaturationPos == RConstants::eod)
+        {
+            relativeSaturationPos = this->pModel->addVariable(R_VARIABLE_RELATIVE_SATURATION);
+
+            this->pModel->getVariable(relativeSaturationPos).getVariableData().setMinMaxDisplayValue(0.0,1.0);
+        }
+        RVariable &relativeSaturation = this->pModel->getVariable(relativeSaturationPos);
+
+        relativeSaturation.setApplyType(R_VARIABLE_APPLY_NODE);
+        relativeSaturation.resize(1,this->pModel->getNNodes());
+        for (uint i=0;i<this->pModel->getNNodes();i++)
+        {
+            relativeSaturation.setValue(0,i,this->nodeConcentration[i] / this->maximumSaturation);
+        }
+    }
+    else if (relativeSaturationPos != RConstants::eod)
+    {
+        // Saturation is no longer limited - remove stale results.
+        this->pModel->removeVariable(relativeSaturationPos);
+    }
+
     RLogger::unindent();
 }
 
@@ -427,6 +547,7 @@ void RSolverFluidParticle::computeElementGeneral(unsigned int elementID, RRMatri
     RRMatrix &ke = matrixCotainer.ke;
     RRMatrix &cte = matrixCotainer.cte;
     RRMatrix &kte = matrixCotainer.kte;
+    RRMatrix &re = matrixCotainer.re;
 
     // Element level vectors
     RRVector &fv = matrixCotainer.fv;
@@ -443,6 +564,12 @@ void RSolverFluidParticle::computeElementGeneral(unsigned int elementID, RRMatri
     // element level velocity direction
     RR3Vector s(ve);
     s.normalize();
+    // node level saturation coefficients
+    RRVector &sv = matrixCotainer.sv;
+    for (uint n=0;n<nen;n++)
+    {
+        sv[n] = this->computeNodeSaturationCoefficient(element.getNodeId(n));
+    }
 
     for (uint intPoint=0;intPoint<nInp;intPoint++)
     {
@@ -452,6 +579,20 @@ void RSolverFluidParticle::computeElementGeneral(unsigned int elementID, RRMatri
         double detJ = this->shapeDerivations[elementID]->getJacobian(intPoint);
 
         double integValue = detJ * shapeFunc.getW();
+
+        // Continuous (interpolated) velocity and its divergence at integration point for the Galerkin
+        // advection term in skew-symmetric form, see computeElementConstantDerivative().
+        RR3Vector vip(0.0,0.0,0.0);
+        double divV = 0.0;
+        for (uint n=0;n<nen;n++)
+        {
+            uint nodeID = element.getNodeId(n);
+            RR3Vector vn(this->nodeVelocity.x[nodeID],this->nodeVelocity.y[nodeID],this->nodeVelocity.z[nodeID]);
+            vip[0] += N[n] * vn[0];
+            vip[1] += N[n] * vn[1];
+            vip[2] += N[n] * vn[2];
+            divV += B[n][0] * vn[0] + B[n][1] * vn[1] + B[n][2] * vn[2];
+        }
 
         // advection operator (v . grad N)
         RRVector &vdiv = matrixCotainer.vdiv;
@@ -468,25 +609,17 @@ void RSolverFluidParticle::computeElementGeneral(unsigned int elementID, RRMatri
         {
             h = 2.0/h;
         }
-        // Reynolds numbers
-        double Re(k == 0.0 ? 0.0 : mvh * h / (2.0 * k));
-
         // SUPG stabilization parameter
-        double Tsupg = 0.0;
-        if (mvh > 0.0)
-        {
-            Tsupg = h / (2.0 * mvh);
-            if (Re > 0.0 && Re <= 3.0)
-            {
-                Tsupg *= Re / 3.0;
-            }
-        }
+        double Tsupg = computeSupgParameter(h,mvh,k,unsteady ? dt : 0.0);
 
         // Particle rate at integration point
         double fip = 0.0;
+        // Saturation coefficient at integration point
+        double sip = 0.0;
         for (uint n=0;n<nen;n++)
         {
             fip += this->nodeRate[element.getNodeId(n)] * N[n];
+            sip += sv[n] * N[n];
         }
 
         for (uint m=0;m<nen;m++)
@@ -495,15 +628,20 @@ void RSolverFluidParticle::computeElementGeneral(unsigned int elementID, RRMatri
             {
                 // m matrix
                 me[m][n] = unsteady ? ca * N[m] * N[n] : 0.0;
-                // c matrix
-                ce[m][n] = ca * N[m] * vdiv[n];
+                // c matrix (skew-symmetric form)
+                ce[m][n] = ca * N[m] * (  vip[0] * B[n][0] + vip[1] * B[n][1] + vip[2] * B[n][2]
+                                        + 0.5 * divV * N[n]);
                 // k matrix
                 ke[m][n] = k * (B[m][0] * B[n][0] + B[m][1] * B[n][1] + B[m][2] * B[n][2]);
                 // c~ matrix
                 cte[m][n] = unsteady ? Tsupg * ca * vdiv[m] * N[n] : 0.0;
                 // k~ matrix
                 kte[m][n] = Tsupg * ca * vdiv[m] * vdiv[n];
+                // r matrix (SUPG weighted saturation limit, Galerkin part is added below)
+                re[m][n] = Tsupg * vdiv[m] * sip * N[n];
             }
+            // r matrix (Galerkin saturation limit lumped same as the source so that it cancels the source at saturation)
+            re[m][m] += sv[m] * N[m];
             // f vector (Galerkin + SUPG weighted source)
             fv[m] = this->nodeRate[element.getNodeId(m)] * N[m] + Tsupg * vdiv[m] * fip;
         }
@@ -516,11 +654,11 @@ void RSolverFluidParticle::computeElementGeneral(unsigned int elementID, RRMatri
                 if (unsteady)
                 {
                     Ae[m][n] += integValue * (  me[m][n] + cte[m][n]
-                                              + alpha * dt * (ce[m][n] + ke[m][n] + kte[m][n]));
+                                              + alpha * dt * (ce[m][n] + ke[m][n] + kte[m][n] + re[m][n]));
                 }
                 else
                 {
-                    Ae[m][n] += integValue * (ce[m][n] + ke[m][n] + kte[m][n]);
+                    Ae[m][n] += integValue * (ce[m][n] + ke[m][n] + kte[m][n] + re[m][n]);
                 }
             }
             if (unsteady)
@@ -529,7 +667,7 @@ void RSolverFluidParticle::computeElementGeneral(unsigned int elementID, RRMatri
                 for (uint n=0;n<nen;n++)
                 {
                     be[m] += integValue
-                           * (me[m][n] + cte[m][n] - (1.0 - alpha) * dt * (ce[m][n] + ke[m][n] + kte[m][n]))
+                           * (me[m][n] + cte[m][n] - (1.0 - alpha) * dt * (ce[m][n] + ke[m][n] + kte[m][n] + re[m][n]))
                            * this->nodeConcentration[element.getNodeId(n)];
                 }
             }
@@ -566,6 +704,7 @@ void RSolverFluidParticle::computeElementConstantDerivative(unsigned int element
     RRMatrix &ke = matrixCotainer.ke;
     RRMatrix &cte = matrixCotainer.cte;
     RRMatrix &kte = matrixCotainer.kte;
+    RRMatrix &re = matrixCotainer.re;
 
     // Element level vectors
     RRVector &fv = matrixCotainer.fv;
@@ -582,6 +721,12 @@ void RSolverFluidParticle::computeElementConstantDerivative(unsigned int element
     // element level velocity direction
     RR3Vector s(ve);
     s.normalize();
+    // node level saturation coefficients
+    RRVector &sv = matrixCotainer.sv;
+    for (uint n=0;n<nen;n++)
+    {
+        sv[n] = this->computeNodeSaturationCoefficient(element.getNodeId(n));
+    }
 
     const RRVector &iN = RElement::getMassVector(element.getType());
     const RRMatrix &iNiN = RElement::getMassMatrix(element.getType());
@@ -603,18 +748,27 @@ void RSolverFluidParticle::computeElementConstantDerivative(unsigned int element
     {
         h = 2.0/h;
     }
-    // Reynolds numbers
-    double Re(k == 0.0 ? 0.0 : mvh * h / (2.0 * k));
-
     // SUPG stabilization parameter
-    double Tsupg = 0.0;
-    if (mvh > 0.0)
+    double Tsupg = computeSupgParameter(h,mvh,k,unsteady ? dt : 0.0);
+
+    // Galerkin advection term in skew-symmetric form with continuous (nodal) velocity,
+    //   int( N_m * ( v . grad(C) + 0.5 * div(v) * C ) )
+    // Discrete velocity of the flow solution is not exactly divergence free and advection with an
+    // element-constant velocity, whose normal component jumps across element faces, can create
+    // energy - with little SUPG diffusion (small time step) the solution then grows without bound.
+    // In this form the face contributions of a continuous velocity cancel, so advection only moves
+    // the contaminant. For a divergence free velocity the added term vanishes.
+    RRMatrix &vb = matrixCotainer.vb;
+    double divV = 0.0;
+    for (uint o=0;o<nen;o++)
     {
-        Tsupg = h / (2.0 * mvh);
-        if (Re > 0.0 && Re <= 3.0)
+        uint nodeID = element.getNodeId(o);
+        RR3Vector vo(this->nodeVelocity.x[nodeID],this->nodeVelocity.y[nodeID],this->nodeVelocity.z[nodeID]);
+        for (uint n=0;n<nen;n++)
         {
-            Tsupg *= Re / 3.0;
+            vb[o][n] = vo[0] * B[n][0] + vo[1] * B[n][1] + vo[2] * B[n][2];
         }
+        divV += vb[o][o];
     }
 
     // Integral of particle rate over the element (reference coordinates)
@@ -630,15 +784,28 @@ void RSolverFluidParticle::computeElementConstantDerivative(unsigned int element
         {
             // m matrix
             me[m][n] = unsteady ? ca * iNiN[m][n] : 0.0;
-            // c matrix
-            ce[m][n] = ca * iN[m] * vdiv[n];
+            // c matrix (skew-symmetric form)
+            ce[m][n] = 0.5 * divV * iNiN[m][n];
+            for (uint o=0;o<nen;o++)
+            {
+                ce[m][n] += iNiN[m][o] * vb[o][n];
+            }
+            ce[m][n] *= ca;
             // k matrix
             ke[m][n] = k * wt * (B[m][0] * B[n][0] + B[m][1] * B[n][1] + B[m][2] * B[n][2]);
             // c~ matrix
             cte[m][n] = unsteady ? Tsupg * ca * vdiv[m] * iN[n] : 0.0;
             // k~ matrix
             kte[m][n] = Tsupg * ca * vdiv[m] * vdiv[n] * wt;
+            // r matrix (SUPG weighted saturation limit, Galerkin part is added below)
+            re[m][n] = 0.0;
+            for (uint o=0;o<nen;o++)
+            {
+                re[m][n] += Tsupg * vdiv[m] * sv[o] * iNiN[o][n];
+            }
         }
+        // r matrix (Galerkin saturation limit lumped same as the source so that it cancels the source at saturation)
+        re[m][m] += sv[m] * iN[m];
         // f vector (Galerkin + SUPG weighted source)
         fv[m] = this->nodeRate[element.getNodeId(m)] * iN[m] + Tsupg * vdiv[m] * fInt;
     }
@@ -651,11 +818,11 @@ void RSolverFluidParticle::computeElementConstantDerivative(unsigned int element
             if (unsteady)
             {
                 Ae[m][n] = me[m][n] + cte[m][n]
-                         + alpha * dt * (ce[m][n] + ke[m][n] + kte[m][n]);
+                         + alpha * dt * (ce[m][n] + ke[m][n] + kte[m][n] + re[m][n]);
             }
             else
             {
-                Ae[m][n] = ce[m][n] + ke[m][n] + kte[m][n];
+                Ae[m][n] = ce[m][n] + ke[m][n] + kte[m][n] + re[m][n];
             }
         }
         if (unsteady)
@@ -663,7 +830,7 @@ void RSolverFluidParticle::computeElementConstantDerivative(unsigned int element
             be[m] = dt * fv[m];
             for (uint n=0;n<nen;n++)
             {
-                be[m] += (me[m][n] + cte[m][n] - (1.0 - alpha) * dt * (ce[m][n] + ke[m][n] + kte[m][n]))
+                be[m] += (me[m][n] + cte[m][n] - (1.0 - alpha) * dt * (ce[m][n] + ke[m][n] + kte[m][n] + re[m][n]))
                        * this->nodeConcentration[element.getNodeId(n)];
             }
         }
