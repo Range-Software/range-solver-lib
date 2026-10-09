@@ -40,6 +40,9 @@ class RSolverFluidParticle : public RSolverGeneric
         //! Maximum saturation (scaled), zero if saturation is not limited.
         double maximumSaturation;
 
+        //! Surface elements on the boundary of the computed volume (a face of exactly one volume element).
+        RBVector boundaryFaces;
+
         //! Concentration convergence.
         double cvgC;
 
@@ -109,6 +112,12 @@ class RSolverFluidParticle : public RSolverGeneric
 
         //! Clear element shape derivatives.
         void clearShapeDerivatives();
+
+        //! Find surface elements on the boundary of the computed volume.
+        void findBoundaryFaces();
+
+        //! Compute boundary element matrix of flow entering through a free boundary.
+        void computeBackflowElement(unsigned int elementID, RRMatrix &Ae, RRVector &be);
 
         //! Compute element matrix.
         void computeElement(unsigned int elementID, RRMatrix &Ae, RRVector &be, RMatrixManager<FluidParticleMatrixContainer> &matrixManager);

@@ -314,6 +314,13 @@ unaffected.
   divergence free velocity the added term is zero. Added a test on a strongly
   non-solenoidal flow, where the peak went from about 30 to about 1600 when the
   run was doubled and now grows only with the injected mass
+- **RSolverFluidParticle** treats flow entering through a free boundary - a
+  boundary without *Particle concentration*, typically backflow at a pressure
+  outlet - as an inflow of clean fluid through the weak term
+  `int( max(-v.n,0) * C * w )` on its surface elements. The advection boundary
+  term fed energy into the solution there and the concentration at the outlet
+  grew without bound. Outflow and walls are not affected. Added a test with
+  flow entering through a free face, which grew to about `2.6e5` before
 
 ### Bug fixes
 

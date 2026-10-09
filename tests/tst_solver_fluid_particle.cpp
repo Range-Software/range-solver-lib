@@ -136,8 +136,8 @@ RModel buildCube(double particleRate, double maximumSaturation, bool sourceInFir
 }
 
 //! Add triangles on the faces X = 0 and X = 1 of the cube from buildCube() as surfaces
-//! with prescribed particle concentration.
-void addEndFaces(RModel &model, uint nx, uint nyz, double cStart, double cEnd)
+//! with prescribed particle concentration, or free (natural) when prescribeConcentration is false.
+void addEndFaces(RModel &model, uint nx, uint nyz, double cStart, double cEnd, bool prescribeConcentration = true)
 {
     auto nodeIndex = [nx,nyz](uint i, uint j, uint k) { return i + (nx+1)*(j + (nyz+1)*k); };
 
@@ -156,9 +156,12 @@ void addEndFaces(RModel &model, uint nx, uint nyz, double cStart, double cEnd)
         RSurface &surface = model.getSurface(face);
         surface.setName(face == 0 ? "Start" : "End");
 
-        RBoundaryCondition concentrationBc(R_BOUNDARY_CONDITION_PARTICLE_CONCENTRATION);
-        concentrationBc.getComponent(concentrationBc.findComponentPosition(R_VARIABLE_PARTICLE_CONCENTRATION)).add(0.0,face == 0 ? cStart : cEnd);
-        surface.addBoundaryCondition(concentrationBc);
+        if (prescribeConcentration)
+        {
+            RBoundaryCondition concentrationBc(R_BOUNDARY_CONDITION_PARTICLE_CONCENTRATION);
+            concentrationBc.getComponent(concentrationBc.findComponentPosition(R_VARIABLE_PARTICLE_CONCENTRATION)).add(0.0,face == 0 ? cStart : cEnd);
+            surface.addBoundaryCondition(concentrationBc);
+        }
     }
 }
 
@@ -213,6 +216,7 @@ private slots:
     void transientUnlimitedSourceIsLinear();
     void transientSmallCourantNumberIsStable();
     void transientNonSolenoidalFlowIsBounded();
+    void transientBackflowIsBounded();
     void steadyDiffusionIsLinear();
     void steadyAdvectionDiffusionProfile_data();
     void steadyAdvectionDiffusionProfile();
@@ -505,6 +509,53 @@ void TestSolverFluidParticle::transientNonSolenoidalFlowIsBounded()
                         .arg(cMax[0]).arg(nTimeSteps).arg(cMax[1]).arg(2*nTimeSteps)));
     QVERIFY2(cMax[1] < 5.0*cBound,
              qPrintable(QString("Peak concentration %1 far beyond the bound f * t = %2").arg(cMax[1]).arg(cBound)));
+}
+
+//! Flow entering through a free boundary (backflow at a pressure outlet) carries no prescribed
+//! concentration. Without an inflow treatment the advection boundary term feeds energy into the
+//! solution there and it grows without bound. Here all flow enters through the free face X = 1
+//! and leaves through the free face X = 0; the source sits next to the exit, so the steady
+//! concentration is about f * h / |v| and the field must stay near it.
+void TestSolverFluidParticle::transientBackflowIsBounded()
+{
+    const double particleRate = 1.0; // [kg/(m^3*s)]
+    const uint nTimeSteps = 200;
+    const double dt = 0.01; // [s]
+    const double speed = 1.0; // [m/s]
+    const uint n = 6;
+
+    std::vector<double> cMax;
+
+    for (uint nSteps : { nTimeSteps, 2*nTimeSteps })
+    {
+        RModel model = buildCube(particleRate,0.0,true,n,n);
+        addEndFaces(model,n,n,0.0,0.0,false);
+        setTransient(model,nSteps,dt);
+
+        // Solver clears results on construction, velocity has to be set afterwards.
+        RSolver solver(model,QString(),QString());
+
+        std::vector<RRVector> velocity(3,RRVector(model.getNNodes(),0.0));
+        velocity[0].fill(-speed);
+        setNodeVariable(model,R_VARIABLE_VELOCITY,velocity);
+
+        solver.run();
+
+        double c = 0.0;
+        for (uint i=0;i<model.getNNodes();i++)
+        {
+            double ci = nodeValue(model,R_VARIABLE_PARTICLE_CONCENTRATION,i);
+            QVERIFY2(std::isfinite(ci),qPrintable(QString("Node %1: non finite concentration").arg(i)));
+            c = std::max(c,std::fabs(ci));
+        }
+        cMax.push_back(c);
+    }
+
+    // Residence time in the source slice is (1/n) / |v|.
+    double cSteady = particleRate / (double(n) * speed);
+    QVERIFY2(cMax[1] < 3.0*cSteady && cMax[1] < 1.5*cMax[0],
+             qPrintable(QString("Concentration grows: %1 after %2 steps, %3 after %4 steps, steady value about %5")
+                        .arg(cMax[0]).arg(nTimeSteps).arg(cMax[1]).arg(2*nTimeSteps).arg(cSteady)));
 }
 
 QTEST_APPLESS_MAIN(TestSolverFluidParticle)

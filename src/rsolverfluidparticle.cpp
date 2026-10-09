@@ -213,6 +213,7 @@ void RSolverFluidParticle::prepare()
     if (this->taskIteration == 0 || this->meshChanged)
     {
         this->generateNodeBook(R_PROBLEM_FLUID_PARTICLE);
+        this->findBoundaryFaces();
     }
 
     this->generateVariableVector(R_VARIABLE_PARTICLE_CONCENTRATION,this->elementConcentration,concentrationSetValues,true,this->firstRun,this->firstRun);
@@ -307,6 +308,10 @@ void RSolverFluidParticle::prepare()
                     continue;
                 }
                 this->computeElement(elementID,Ae,be,matrixManager);
+            }
+            else if (R_ELEMENT_TYPE_IS_SURFACE(element.getType()) && this->boundaryFaces[elementID])
+            {
+                this->computeBackflowElement(elementID,Ae,be);
             }
             this->assemblyMatrix(elementID,Ae,be,Ap[omp_get_thread_num()],bp[omp_get_thread_num()]);
         }
@@ -507,6 +512,107 @@ void RSolverFluidParticle::clearShapeDerivatives()
         delete this->shapeDerivations[i];
     }
     this->shapeDerivations.clear();
+}
+
+void RSolverFluidParticle::findBoundaryFaces()
+{
+    this->boundaryFaces.resize(this->pModel->getNElements());
+    this->boundaryFaces.fill(false);
+
+    // Node -> computable volume elements.
+    std::vector<std::vector<uint>> nodeToVolumeElements(this->pModel->getNNodes());
+    for (uint i=0;i<this->pModel->getNElements();i++)
+    {
+        const RElement &rElement = this->pModel->getElement(i);
+        if (!R_ELEMENT_TYPE_IS_VOLUME(rElement.getType()) || !this->computableElements[i])
+        {
+            continue;
+        }
+        for (uint j=0;j<rElement.size();j++)
+        {
+            nodeToVolumeElements[rElement.getNodeId(j)].push_back(i);
+        }
+    }
+
+    // A face of exactly one volume element lies on the boundary - faces between two volumes are skipped.
+    for (uint i=0;i<this->pModel->getNElements();i++)
+    {
+        const RElement &rElement = this->pModel->getElement(i);
+        if (!R_ELEMENT_TYPE_IS_SURFACE(rElement.getType()) || rElement.size() == 0)
+        {
+            continue;
+        }
+        uint nVolumeElements = 0;
+        for (uint volumeElementID : nodeToVolumeElements[rElement.getNodeId(0)])
+        {
+            const RElement &rVolumeElement = this->pModel->getElement(volumeElementID);
+            bool hasAllNodes = true;
+            for (uint j=1;j<rElement.size() && hasAllNodes;j++)
+            {
+                hasAllNodes = rVolumeElement.hasNodeId(rElement.getNodeId(j));
+            }
+            if (hasAllNodes)
+            {
+                nVolumeElements++;
+            }
+        }
+        this->boundaryFaces[i] = (nVolumeElements == 1);
+    }
+}
+
+void RSolverFluidParticle::computeBackflowElement(unsigned int elementID, RRMatrix &Ae, RRVector &be)
+{
+    // Flow entering through a free boundary - typically backflow at a pressure outlet - carries no
+    // prescribed concentration. The Galerkin advection term then feeds energy into the solution there,
+    // -0.5 * int( v.n * C^2 ) > 0 for v.n < 0, and it grows without bound. Such flow is treated as an
+    // inflow of clean fluid by the weak term
+    //   int( max(-v.n,0) * C * w )
+    // which turns that boundary contribution into dissipation. Outflow and walls (v.n >= 0) are not
+    // affected. Nodes with prescribed concentration are eliminated during assembly.
+    const RElement &element = this->pModel->getElement(elementID);
+    uint nen = element.size();
+
+    Ae.fill(0.0);
+    be.fill(0.0);
+
+    double area = 0.0;
+    RR3Vector n;
+    if (!element.findArea(this->pModel->getNodes(),area) ||
+        !element.findNormal(this->pModel->getNodes(),n[0],n[1],n[2]))
+    {
+        return;
+    }
+    // Outward unit normal.
+    n.normalize();
+    if (this->inwardElements[elementID])
+    {
+        n[0] = -n[0];
+        n[1] = -n[1];
+        n[2] = -n[2];
+    }
+
+    bool unsteady = (this->pModel->getTimeSolver().getEnabled());
+    double alpha = this->pModel->getTimeSolver().getTimeMarchApproximationCoefficient();
+    double dt = this->pModel->getTimeSolver().getCurrentTimeStepSize();
+
+    for (uint m=0;m<nen;m++)
+    {
+        uint nodeID = element.getNodeId(m);
+        double vn = this->nodeVelocity.x[nodeID] * n[0]
+                  + this->nodeVelocity.y[nodeID] * n[1]
+                  + this->nodeVelocity.z[nodeID] * n[2];
+        // Lumped, so that the term only damps.
+        double r = std::max(-vn,0.0) * area / double(nen);
+        if (unsteady)
+        {
+            Ae[m][m] = alpha * dt * r;
+            be[m] = -(1.0 - alpha) * dt * r * this->nodeConcentration[nodeID];
+        }
+        else
+        {
+            Ae[m][m] = r;
+        }
+    }
 }
 
 void RSolverFluidParticle::computeElement(unsigned int elementID, RRMatrix &Ae, RRVector &be, RMatrixManager<FluidParticleMatrixContainer> &matrixManager)
