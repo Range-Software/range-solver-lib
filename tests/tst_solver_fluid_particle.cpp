@@ -217,7 +217,11 @@ private slots:
     void transientSmallCourantNumberIsStable();
     void transientNonSolenoidalFlowIsBounded();
     void transientBackflowIsBounded();
+    void transientConvergingFlowCreatesNoMaximum();
+    void transientBackflowAtNoSlipEdgeIsBounded();
     void steadyDiffusionIsLinear();
+    void steadyFluxDiffusionIsLinear();
+    void steadyMassTransferDiffusionIsLinear();
     void steadyAdvectionDiffusionProfile_data();
     void steadyAdvectionDiffusionProfile();
 };
@@ -393,6 +397,82 @@ void TestSolverFluidParticle::steadyDiffusionIsLinear()
     }
 }
 
+//! Pure diffusion from a face with prescribed particle flux q to a face with zero
+//! concentration gives linear profile c = q/D * (1 - x).
+void TestSolverFluidParticle::steadyFluxDiffusionIsLinear()
+{
+    const uint nx = 6;
+    const uint nyz = 2;
+    const double diffusionCoefficient = 1.0e-3;
+    const double flux = 2.0e-3;
+
+    RModel model = buildCube(0.0,0.0,false,nx,nyz);
+    addEndFaces(model,nx,nyz,0.0,0.0,false);
+
+    RBoundaryCondition fluxBc(R_BOUNDARY_CONDITION_PARTICLE_FLUX);
+    fluxBc.getComponent(fluxBc.findComponentPosition(R_VARIABLE_PARTICLE_FLUX)).add(0.0,flux);
+    model.getSurface(0).addBoundaryCondition(fluxBc);
+
+    RBoundaryCondition concentrationBc(R_BOUNDARY_CONDITION_PARTICLE_CONCENTRATION);
+    concentrationBc.getComponent(concentrationBc.findComponentPosition(R_VARIABLE_PARTICLE_CONCENTRATION)).add(0.0,0.0);
+    model.getSurface(1).addBoundaryCondition(concentrationBc);
+
+    model.getProblemSetup().getParticleSetup().setDiffusionCoefficient(diffusionCoefficient);
+    model.getTimeSolver().setEnabled(false);
+
+    RSolver solver(model,QString(),QString());
+    solver.run();
+
+    for (uint i=0;i<model.getNNodes();i++)
+    {
+        double c = nodeValue(model,R_VARIABLE_PARTICLE_CONCENTRATION,i);
+        double x = model.getNode(i).getX();
+        double expected = flux / diffusionCoefficient * (1.0 - x);
+        QVERIFY2(std::fabs(c-expected) < 1.0e-6,
+                 qPrintable(QString("Node %1 (x = %2): c = %3, expected %4").arg(i).arg(x).arg(c).arg(expected)));
+    }
+}
+
+//! Pure diffusion from a face with mass transfer beta * (cInf - c) to a face with zero
+//! concentration gives linear profile c = c0 * (1 - x), where D * c0 = beta * (cInf - c0).
+void TestSolverFluidParticle::steadyMassTransferDiffusionIsLinear()
+{
+    const uint nx = 6;
+    const uint nyz = 2;
+    const double diffusionCoefficient = 1.0e-3;
+    const double massTransferCoefficient = 3.0e-3;
+    const double ambientConcentration = 2.0;
+
+    RModel model = buildCube(0.0,0.0,false,nx,nyz);
+    addEndFaces(model,nx,nyz,0.0,0.0,false);
+
+    RBoundaryCondition massTransferBc(R_BOUNDARY_CONDITION_PARTICLE_MASS_TRANSFER);
+    massTransferBc.getComponent(massTransferBc.findComponentPosition(R_VARIABLE_PARTICLE_MASS_TRANSFER_COEFFICIENT)).add(0.0,massTransferCoefficient);
+    massTransferBc.getComponent(massTransferBc.findComponentPosition(R_VARIABLE_PARTICLE_AMBIENT_CONCENTRATION)).add(0.0,ambientConcentration);
+    model.getSurface(0).addBoundaryCondition(massTransferBc);
+
+    RBoundaryCondition concentrationBc(R_BOUNDARY_CONDITION_PARTICLE_CONCENTRATION);
+    concentrationBc.getComponent(concentrationBc.findComponentPosition(R_VARIABLE_PARTICLE_CONCENTRATION)).add(0.0,0.0);
+    model.getSurface(1).addBoundaryCondition(concentrationBc);
+
+    model.getProblemSetup().getParticleSetup().setDiffusionCoefficient(diffusionCoefficient);
+    model.getTimeSolver().setEnabled(false);
+
+    RSolver solver(model,QString(),QString());
+    solver.run();
+
+    double c0 = massTransferCoefficient * ambientConcentration / (diffusionCoefficient + massTransferCoefficient);
+
+    for (uint i=0;i<model.getNNodes();i++)
+    {
+        double c = nodeValue(model,R_VARIABLE_PARTICLE_CONCENTRATION,i);
+        double x = model.getNode(i).getX();
+        double expected = c0 * (1.0 - x);
+        QVERIFY2(std::fabs(c-expected) < 1.0e-6,
+                 qPrintable(QString("Node %1 (x = %2): c = %3, expected %4").arg(i).arg(x).arg(c).arg(expected)));
+    }
+}
+
 void TestSolverFluidParticle::steadyAdvectionDiffusionProfile_data()
 {
     QTest::addColumn<double>("pecletNumber");
@@ -556,6 +636,121 @@ void TestSolverFluidParticle::transientBackflowIsBounded()
     QVERIFY2(cMax[1] < 3.0*cSteady && cMax[1] < 1.5*cMax[0],
              qPrintable(QString("Concentration grows: %1 after %2 steps, %3 after %4 steps, steady value about %5")
                         .arg(cMax[0]).arg(nTimeSteps).arg(cMax[1]).arg(2*nTimeSteps).arg(cSteady)));
+}
+
+//! In converging flow (div(v) < 0) a uniform concentration is the exact solution of the advection
+//! equation. The skew-symmetric advection term 0.5 * div(v) * C acts there as a source and the
+//! concentration grows, piling up where a discrete flow field is far from divergence free. Here
+//! the flow converges to the cube centre and is zero on the walls. Next to the walls the flow
+//! expands and the divergence sink lowers the concentration; the gradient it creates is then
+//! steepened by the converging flow and Galerkin advection overshoots - a bounded overshoot (about
+//! 2) is expected, the source of the skew-symmetric form drives it to about 7.
+void TestSolverFluidParticle::transientConvergingFlowCreatesNoMaximum()
+{
+    const uint nTimeSteps = 100;
+    const double dt = 0.01; // [s]
+    const double rate = 5.0; // [1/s] convergence rate, div(v) = -3 * rate
+    const uint n = 6;
+
+    RModel model = buildCube(0.0,0.0,false,n,n);
+
+    RInitialCondition concentrationIc(R_INITIAL_CONDITION_PARTICLE_CONCENTRATION);
+    concentrationIc.getComponent(concentrationIc.findComponentPosition(R_VARIABLE_PARTICLE_CONCENTRATION)).add(0.0,1.0);
+    model.getVolume(0).addInitialCondition(concentrationIc);
+
+    setTransient(model,nTimeSteps,dt);
+
+    // Solver clears results on construction, velocity has to be set afterwards.
+    RSolver solver(model,QString(),QString());
+
+    std::vector<RRVector> velocity(3,RRVector(model.getNNodes(),0.0));
+    for (uint i=0;i<model.getNNodes();i++)
+    {
+        const RNode &node = model.getNode(i);
+        bool onWall = false;
+        for (double coordinate : { node.getX(), node.getY(), node.getZ() })
+        {
+            onWall = onWall || coordinate < 1.0e-9 || coordinate > 1.0 - 1.0e-9;
+        }
+        if (onWall)
+        {
+            continue;
+        }
+        velocity[0][i] = -rate * (node.getX() - 0.5);
+        velocity[1][i] = -rate * (node.getY() - 0.5);
+        velocity[2][i] = -rate * (node.getZ() - 0.5);
+    }
+    setNodeVariable(model,R_VARIABLE_VELOCITY,velocity);
+
+    solver.run();
+
+    double cMax = 0.0;
+    for (uint i=0;i<model.getNNodes();i++)
+    {
+        double ci = nodeValue(model,R_VARIABLE_PARTICLE_CONCENTRATION,i);
+        QVERIFY2(std::isfinite(ci),qPrintable(QString("Node %1: non finite concentration").arg(i)));
+        cMax = std::max(cMax,ci);
+    }
+    QVERIFY2(cMax < 3.0,
+             qPrintable(QString("Converging flow creates a maximum: %1, initial value 1").arg(cMax)));
+}
+
+//! Flow enters through the free face X = 1 with a profile that is zero on the face edges, as at a
+//! no-slip wall bordering an outlet with backflow. The energy fed in by the advection boundary
+//! term over a face reaches its edge nodes although their own velocity is zero, so the inflow
+//! treatment must damp them as well. Clean fluid entering through X = 1 flushes the initial
+//! concentration out through X = 0; no value may grow beyond the initial one.
+void TestSolverFluidParticle::transientBackflowAtNoSlipEdgeIsBounded()
+{
+    const uint nTimeSteps = 200;
+    const double dt = 0.01; // [s]
+    const double speed = 2.0; // [m/s]
+    const uint n = 6;
+
+    std::vector<double> cMax;
+
+    for (uint nSteps : { nTimeSteps, 2*nTimeSteps })
+    {
+        RModel model = buildCube(0.0,0.0,false,n,n);
+        addEndFaces(model,n,n,0.0,0.0,false);
+
+        RInitialCondition concentrationIc(R_INITIAL_CONDITION_PARTICLE_CONCENTRATION);
+        concentrationIc.getComponent(concentrationIc.findComponentPosition(R_VARIABLE_PARTICLE_CONCENTRATION)).add(0.0,1.0);
+        model.getVolume(0).addInitialCondition(concentrationIc);
+
+        setTransient(model,nSteps,dt);
+
+        // Solver clears results on construction, velocity has to be set afterwards.
+        RSolver solver(model,QString(),QString());
+
+        // Divergence free profile, entering through X = 1 and leaving through X = 0, zero on walls Y and Z.
+        std::vector<RRVector> velocity(3,RRVector(model.getNNodes(),0.0));
+        for (uint i=0;i<model.getNNodes();i++)
+        {
+            const RNode &node = model.getNode(i);
+            velocity[0][i] = -speed * std::sin(M_PI*node.getY()) * std::sin(M_PI*node.getZ());
+        }
+        setNodeVariable(model,R_VARIABLE_VELOCITY,velocity);
+
+        solver.run();
+
+        double c = 0.0;
+        for (uint i=0;i<model.getNNodes();i++)
+        {
+            double ci = nodeValue(model,R_VARIABLE_PARTICLE_CONCENTRATION,i);
+            QVERIFY2(std::isfinite(ci),qPrintable(QString("Node %1: non finite concentration").arg(i)));
+            c = std::max(c,std::fabs(ci));
+        }
+        cMax.push_back(c);
+    }
+
+    qInfo("Peak concentration %g after %u steps, %g after %u steps",cMax[0],nTimeSteps,cMax[1],2*nTimeSteps);
+
+    // Galerkin advection is not monotone - a bounded overshoot of the initial value is expected,
+    // growth is not.
+    QVERIFY2(cMax[1] < 1.2*cMax[0] && cMax[1] < 3.0,
+             qPrintable(QString("Concentration grows at the inflow edge: %1 after %2 steps, %3 after %4 steps, initial value 1")
+                        .arg(cMax[0]).arg(nTimeSteps).arg(cMax[1]).arg(2*nTimeSteps)));
 }
 
 QTEST_APPLESS_MAIN(TestSolverFluidParticle)

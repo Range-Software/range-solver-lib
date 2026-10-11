@@ -151,9 +151,13 @@ double RScales::findScaleFactor(RVariableType variableType) const
         case R_VARIABLE_MASS_FLOW_RATE_Y:
         case R_VARIABLE_MASS_FLOW_RATE_Z:
             return this->kilogram/this->second;
+        case R_VARIABLE_PARTICLE_AMBIENT_CONCENTRATION:
         case R_VARIABLE_PARTICLE_CONCENTRATION:
             return this->kilogram/std::pow(this->metre,3);
         case R_VARIABLE_PARTICLE_FLUX:
+            return this->kilogram/(std::pow(this->metre,2)*this->second);
+        case R_VARIABLE_PARTICLE_MASS_TRANSFER_COEFFICIENT:
+            return this->metre/this->second;
         case R_VARIABLE_PARTICLE_RATE:
             return this->kilogram/(std::pow(this->metre,3)*this->second);
         case R_VARIABLE_PERMEABILITY_TO_FLUIDS:

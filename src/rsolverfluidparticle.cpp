@@ -226,6 +226,11 @@ void RSolverFluidParticle::prepare()
 
     this->generateNodeRateVector();
 
+    RBVector surfaceSetValues;
+    this->generateVariableVector(R_VARIABLE_PARTICLE_FLUX,this->elementFlux,surfaceSetValues,true,false,false);
+    this->generateVariableVector(R_VARIABLE_PARTICLE_MASS_TRANSFER_COEFFICIENT,this->elementMassTransferCoefficient,surfaceSetValues,true,false,false);
+    this->generateVariableVector(R_VARIABLE_PARTICLE_AMBIENT_CONCENTRATION,this->elementAmbientConcentration,surfaceSetValues,true,false,false);
+
     // Model is downscaled at this point - saturation must be scaled same as concentration.
     this->maximumSaturation = std::max(this->pModel->getProblemSetup().getParticleSetup().getMaximumSaturation(),0.0)
                             * this->scales.findScaleFactor(R_VARIABLE_PARTICLE_CONCENTRATION);
@@ -309,9 +314,9 @@ void RSolverFluidParticle::prepare()
                 }
                 this->computeElement(elementID,Ae,be,matrixManager);
             }
-            else if (R_ELEMENT_TYPE_IS_SURFACE(element.getType()) && this->boundaryFaces[elementID])
+            else if (R_ELEMENT_TYPE_IS_SURFACE(element.getType()) && this->volumeFaces[elementID])
             {
-                this->computeBackflowElement(elementID,Ae,be);
+                this->computeSurfaceElement(elementID,Ae,be);
             }
             this->assemblyMatrix(elementID,Ae,be,Ap[omp_get_thread_num()],bp[omp_get_thread_num()]);
         }
@@ -518,6 +523,8 @@ void RSolverFluidParticle::findBoundaryFaces()
 {
     this->boundaryFaces.resize(this->pModel->getNElements());
     this->boundaryFaces.fill(false);
+    this->volumeFaces.resize(this->pModel->getNElements());
+    this->volumeFaces.fill(false);
 
     // Node -> computable volume elements.
     std::vector<std::vector<uint>> nodeToVolumeElements(this->pModel->getNNodes());
@@ -557,60 +564,125 @@ void RSolverFluidParticle::findBoundaryFaces()
             }
         }
         this->boundaryFaces[i] = (nVolumeElements == 1);
+        this->volumeFaces[i] = (nVolumeElements > 0);
     }
 }
 
-void RSolverFluidParticle::computeBackflowElement(unsigned int elementID, RRMatrix &Ae, RRVector &be)
+void RSolverFluidParticle::computeSurfaceElement(unsigned int elementID, RRMatrix &Ae, RRVector &be)
 {
-    // Flow entering through a free boundary - typically backflow at a pressure outlet - carries no
-    // prescribed concentration. The Galerkin advection term then feeds energy into the solution there,
+    // Weak surface terms, all lumped so that they only damp:
+    //
+    // Particle flux q (Neumann) - diffusive flux entering the domain, k * grad(C) . n = q. Integration by
+    // parts of the diffusion term leaves -int( k * grad(C) . n * w ), which moves to the right hand side
+    // as int( q * w ). Positive q is emission and is limited by saturation same as the particle rate,
+    // q * (1 - C / cSat).
+    //
+    // Mass transfer (Robin) - flux entering the domain q = beta * (cInf - C).
+    //
+    // Backflow - flow entering through a free boundary, typically backflow at a pressure outlet, carries
+    // no prescribed concentration. The Galerkin advection term then feeds energy into the solution there,
     // -0.5 * int( v.n * C^2 ) > 0 for v.n < 0, and it grows without bound. Such flow is treated as an
     // inflow of clean fluid by the weak term
-    //   int( max(-v.n,0) * C * w )
-    // which turns that boundary contribution into dissipation. Outflow and walls (v.n >= 0) are not
-    // affected. Nodes with prescribed concentration are eliminated during assembly.
+    //   int( b * C * w ),  b = sum( N_o * max(-v_o.n,0) )
+    // which turns that boundary contribution into dissipation. It is lumped by rows of the consistent
+    // matrix, r_n = int( N_n * b ), which dominates the consistent term as b >= max(-v.n,0) and so
+    // the energy fed in. Lumping with the nodal value alone would leave nodes with zero velocity - a
+    // no-slip edge of the outlet - undamped, while backflow at neighbouring nodes feeds them. Outflow and walls (v.n >= 0) are not
+    // affected. Combined with a particle flux or mass transfer, the inflow carries the prescribed flux.
+    // Backflow is applied only on the boundary of the computed volume, flux and mass transfer on an
+    // internal face act as a sheet source.
+    //
+    // Nodes with prescribed concentration are eliminated during assembly.
     const RElement &element = this->pModel->getElement(elementID);
     uint nen = element.size();
 
     Ae.fill(0.0);
     be.fill(0.0);
 
-    double area = 0.0;
-    RR3Vector n;
-    if (!element.findArea(this->pModel->getNodes(),area) ||
-        !element.findNormal(this->pModel->getNodes(),n[0],n[1],n[2]))
+    double q = this->elementFlux[elementID];
+    // Negative coefficient would feed the solution.
+    double beta = std::max(this->elementMassTransferCoefficient[elementID],0.0);
+    double cInf = this->elementAmbientConcentration[elementID];
+    bool backflow = this->boundaryFaces[elementID];
+
+    if (q == 0.0 && beta == 0.0 && !backflow)
     {
         return;
     }
-    // Outward unit normal.
-    n.normalize();
-    if (this->inwardElements[elementID])
+
+    double area = 0.0;
+    if (!element.findArea(this->pModel->getNodes(),area))
     {
-        n[0] = -n[0];
-        n[1] = -n[1];
-        n[2] = -n[2];
+        return;
     }
+
+    RR3Vector n(0.0,0.0,0.0);
+    if (backflow && !element.findNormal(this->pModel->getNodes(),n[0],n[1],n[2]))
+    {
+        backflow = false;
+    }
+    if (backflow)
+    {
+        // Outward unit normal.
+        n.normalize();
+        if (this->inwardElements[elementID])
+        {
+            n[0] = -n[0];
+            n[1] = -n[1];
+            n[2] = -n[2];
+        }
+    }
+
+    // Saturation limit of emitted flux.
+    double sq = (q > 0.0 && this->maximumSaturation > 0.0) ? q / this->maximumSaturation : 0.0;
 
     bool unsteady = (this->pModel->getTimeSolver().getEnabled());
     double alpha = this->pModel->getTimeSolver().getTimeMarchApproximationCoefficient();
     double dt = this->pModel->getTimeSolver().getCurrentTimeStepSize();
 
+    double nodeArea = area / double(nen);
+
+    // Backflow lumped by rows of consistent surface matrix int( N_n * N_o ) scaled to element area.
+    RRVector rb(nen,0.0);
+    if (backflow)
+    {
+        const RRMatrix &iNiN = RElement::getMassMatrix(element.getType());
+        double iNiNSum = 0.0;
+        for (uint m=0;m<nen;m++)
+        {
+            for (uint o=0;o<nen;o++)
+            {
+                iNiNSum += iNiN[m][o];
+            }
+        }
+        for (uint o=0;o<nen;o++)
+        {
+            uint nodeID = element.getNodeId(o);
+            double vn = this->nodeVelocity.x[nodeID] * n[0]
+                      + this->nodeVelocity.y[nodeID] * n[1]
+                      + this->nodeVelocity.z[nodeID] * n[2];
+            double bo = std::max(-vn,0.0);
+            for (uint m=0;m<nen;m++)
+            {
+                rb[m] += iNiN[m][o] * bo * area / iNiNSum;
+            }
+        }
+    }
+
     for (uint m=0;m<nen;m++)
     {
         uint nodeID = element.getNodeId(m);
-        double vn = this->nodeVelocity.x[nodeID] * n[0]
-                  + this->nodeVelocity.y[nodeID] * n[1]
-                  + this->nodeVelocity.z[nodeID] * n[2];
-        // Lumped, so that the term only damps.
-        double r = std::max(-vn,0.0) * area / double(nen);
+        double r = (beta + sq) * nodeArea + rb[m];
+        double f = (q + beta * cInf) * nodeArea;
         if (unsteady)
         {
             Ae[m][m] = alpha * dt * r;
-            be[m] = -(1.0 - alpha) * dt * r * this->nodeConcentration[nodeID];
+            be[m] = dt * f - (1.0 - alpha) * dt * r * this->nodeConcentration[nodeID];
         }
         else
         {
             Ae[m][m] = r;
+            be[m] = f;
         }
     }
 }
@@ -687,7 +759,7 @@ void RSolverFluidParticle::computeElementGeneral(unsigned int elementID, RRMatri
         double integValue = detJ * shapeFunc.getW();
 
         // Continuous (interpolated) velocity and its divergence at integration point for the Galerkin
-        // advection term in skew-symmetric form, see computeElementConstantDerivative().
+        // advection term, see computeElementConstantDerivative().
         RR3Vector vip(0.0,0.0,0.0);
         double divV = 0.0;
         for (uint n=0;n<nen;n++)
@@ -734,9 +806,9 @@ void RSolverFluidParticle::computeElementGeneral(unsigned int elementID, RRMatri
             {
                 // m matrix
                 me[m][n] = unsteady ? ca * N[m] * N[n] : 0.0;
-                // c matrix (skew-symmetric form)
+                // c matrix (advective form with divergence sink)
                 ce[m][n] = ca * N[m] * (  vip[0] * B[n][0] + vip[1] * B[n][1] + vip[2] * B[n][2]
-                                        + 0.5 * divV * N[n]);
+                                        + 0.5 * std::max(divV,0.0) * N[n]);
                 // k matrix
                 ke[m][n] = k * (B[m][0] * B[n][0] + B[m][1] * B[n][1] + B[m][2] * B[n][2]);
                 // c~ matrix
@@ -857,13 +929,17 @@ void RSolverFluidParticle::computeElementConstantDerivative(unsigned int element
     // SUPG stabilization parameter
     double Tsupg = computeSupgParameter(h,mvh,k,unsteady ? dt : 0.0);
 
-    // Galerkin advection term in skew-symmetric form with continuous (nodal) velocity,
-    //   int( N_m * ( v . grad(C) + 0.5 * div(v) * C ) )
-    // Discrete velocity of the flow solution is not exactly divergence free and advection with an
-    // element-constant velocity, whose normal component jumps across element faces, can create
-    // energy - with little SUPG diffusion (small time step) the solution then grows without bound.
-    // In this form the face contributions of a continuous velocity cancel, so advection only moves
-    // the contaminant. For a divergence free velocity the added term vanishes.
+    // Galerkin advection term in advective form with continuous (nodal) velocity and a divergence sink,
+    //   int( N_m * ( v . grad(C) + 0.5 * max(div(v),0) * C ) )
+    // Discrete velocity of the flow solution is not exactly divergence free (on coarse meshes div(v) of
+    // tens of 1/s is common). Advection with an element-constant velocity, whose normal component jumps
+    // across element faces, can create energy - with little SUPG diffusion (small time step) the
+    // solution then grows without bound. With continuous velocity the face contributions cancel and
+    //   int( C * v . grad(C) ) = 0.5 * int( v.n * C^2 ) - 0.5 * int( div(v) * C^2 )
+    // so only expanding flow (div(v) > 0) creates energy. The sink 0.5 * max(div(v),0) * C cancels it,
+    // while in converging flow (div(v) < 0) no term is added - the skew-symmetric form
+    // 0.5 * div(v) * C would act there as a source and pile the contaminant up next to walls. Energy
+    // then only decreases apart from the boundary term. For a divergence free velocity the sink vanishes.
     RRMatrix &vb = matrixCotainer.vb;
     double divV = 0.0;
     for (uint o=0;o<nen;o++)
@@ -890,8 +966,8 @@ void RSolverFluidParticle::computeElementConstantDerivative(unsigned int element
         {
             // m matrix
             me[m][n] = unsteady ? ca * iNiN[m][n] : 0.0;
-            // c matrix (skew-symmetric form)
-            ce[m][n] = 0.5 * divV * iNiN[m][n];
+            // c matrix (advective form with divergence sink)
+            ce[m][n] = 0.5 * std::max(divV,0.0) * iNiN[m][n];
             for (uint o=0;o<nen;o++)
             {
                 ce[m][n] += iNiN[m][o] * vb[o][n];

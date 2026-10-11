@@ -19,6 +19,12 @@ class RSolverFluidParticle : public RSolverGeneric
         RRVector elementConcentration;
         //! Element particle rate.
         RRVector elementRate;
+        //! Element particle flux (unit area).
+        RRVector elementFlux;
+        //! Element mass transfer coefficient.
+        RRVector elementMassTransferCoefficient;
+        //! Element ambient particle concentration.
+        RRVector elementAmbientConcentration;
         //! Element velocity.
         RSolverCartesianVector<RRVector> elementVelocity;
 
@@ -42,6 +48,8 @@ class RSolverFluidParticle : public RSolverGeneric
 
         //! Surface elements on the boundary of the computed volume (a face of exactly one volume element).
         RBVector boundaryFaces;
+        //! Surface elements which are a face of at least one computed volume element.
+        RBVector volumeFaces;
 
         //! Concentration convergence.
         double cvgC;
@@ -116,8 +124,8 @@ class RSolverFluidParticle : public RSolverGeneric
         //! Find surface elements on the boundary of the computed volume.
         void findBoundaryFaces();
 
-        //! Compute boundary element matrix of flow entering through a free boundary.
-        void computeBackflowElement(unsigned int elementID, RRMatrix &Ae, RRVector &be);
+        //! Compute surface element matrix of particle flux, mass transfer and flow entering through a free boundary.
+        void computeSurfaceElement(unsigned int elementID, RRMatrix &Ae, RRVector &be);
 
         //! Compute element matrix.
         void computeElement(unsigned int elementID, RRMatrix &Ae, RRVector &be, RMatrixManager<FluidParticleMatrixContainer> &matrixManager);

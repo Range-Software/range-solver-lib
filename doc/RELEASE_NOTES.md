@@ -321,6 +321,18 @@ unaffected.
   term fed energy into the solution there and the concentration at the outlet
   grew without bound. Outflow and walls are not affected. Added a test with
   flow entering through a free face, which grew to about `2.6e5` before
+- **RSolverFluidParticle** supports *Particle flux (unit area)*, the diffusive
+  flux `q` entering through a surface (`k grad(C) . n = q`), as the load
+  `int( q * w )`, and *Particle mass transfer*, `q = beta * (c_inf - C)`, as the
+  lumped term `int( beta * C * w )` with load `int( beta * c_inf * w )`. A
+  positive flux is limited by the maximum saturation like the particle rate.
+  Both share the surface element with the backflow term (renamed
+  `computeSurfaceElement()`), so on an inflow part of the boundary the flux is
+  carried by clean incoming fluid. On an internal face between two volumes
+  they act as a sheet source; backflow still applies only on the boundary.
+  Added tests with pure diffusion from a flux face and from a mass transfer
+  face to a face of zero concentration, both reproducing the exact linear
+  profile
 
 ### Bug fixes
 
@@ -333,6 +345,28 @@ unaffected.
 
 #### Contaminant dispersion
 
+- **RSolverFluidParticle** diverged at the edge where a pressure outlet with
+  backflow meets a no-slip wall (concentration about `3e5` after 20 s on the
+  channel model, from about 12 s once the pulse reached the outlet). The
+  backflow term was lumped with each node's own `max(-v.n,0)`, which is zero
+  at a no-slip node, while the advection boundary term
+  `-0.5 * int( v.n * C^2 )` uses the interpolated velocity and fed those nodes
+  from the backflow of their neighbours. The term is now lumped by rows of the
+  consistent surface matrix, `r_n = int( N_n * sum( N_o * max(-v_o.n,0) ) )`,
+  which dominates the energy fed in. The concentration on the channel model
+  now decays smoothly after the pulse passes
+- **RSolverFluidParticle** advection term changed from skew-symmetric form
+  `v . grad(C) + 0.5 * div(v) * C` to advective form with a divergence sink
+  `v . grad(C) + 0.5 * max(div(v),0) * C`. Where the discrete flow field
+  converges (`div(v) < 0`, tens of `1/s` next to walls on a coarse mesh) the
+  skew-symmetric term was a source and piled the contaminant up to 9 times
+  the inlet value; the sink still cancels the energy created where the flow
+  expands, so the earlier non-solenoidal flow stability is kept. Peak on the
+  channel model fell from `9.3` to `3.2` (inlet `1`) with a near zero
+  diffusion coefficient, and to `1.08` with an effective one of `1e-2 m^2/s`
+- Added tests: uniform concentration in converging flow (peak `7.2` before,
+  `2.1` now, exact `1`) and clean backflow through a free face whose velocity
+  is zero on its edges (peak `166` before, `2.0` now and not growing)
 - **RSolverFluidParticle** blew up in transient runs: the concentration grew
   far above the highest inflow value (`3326` against an inflow of `0.62` on
   the tutorial channel model), first in recirculation zones. Causes, all fixed:
