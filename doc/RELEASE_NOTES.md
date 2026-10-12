@@ -336,6 +336,16 @@ unaffected.
 
 ### Bug fixes
 
+#### Fluid flow
+
+- **RSolverFluid** evaluated density and dynamic viscosity only on the first
+  pass of a solve (`taskIteration == 0`) or after a mesh change. In a task group
+  alternating flow and fluid heat the flow therefore kept the properties of the
+  initial temperature for the whole group, and a steady-state run never coupled
+  the two. Both are now evaluated on every pass from the shared element
+  temperature, so a temperature-dependent density drives buoyancy (natural
+  convection) through `rho(T)*g` in steady-state and transient runs alike
+
 #### Fluid heat
 
 - **RSolverFluidHeat** assembled conduction (`-k*grad(N).grad(N)`) with the

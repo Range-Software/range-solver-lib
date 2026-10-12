@@ -346,11 +346,17 @@ void RSolverFluid::prepare()
     if (this->taskIteration == 0 || this->meshChanged)
     {
         this->generateNodeBook();
-        this->generateMaterialVecor(RMaterialProperty::Density,this->elementDensity);
-        this->generateMaterialVecor(RMaterialProperty::DynamicViscosity,this->elementViscosity);
-
         this->findInputVectors();
     }
+
+    // Density and viscosity follow the temperature left in the shared data by
+    // a heat transfer task. They are evaluated on every pass, not only on the
+    // first pass of a solve, so that in a task loop alternating flow and heat
+    // transfer the flow sees the temperature of the latest heat transfer pass.
+    // That is what lets a steady-state run couple the two - a temperature
+    // dependent density turns the body force rho*g into a buoyancy force.
+    this->generateMaterialVecor(RMaterialProperty::Density,this->elementDensity);
+    this->generateMaterialVecor(RMaterialProperty::DynamicViscosity,this->elementViscosity);
 
     {
         const uint ne = this->pModel->getNElements();
