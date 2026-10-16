@@ -10,6 +10,23 @@ class RSolverStress : public RSolverGeneric
 
     protected:
 
+        //! Per-thread assembly buffers.
+        struct AssemblyBuffer
+        {
+            //! System matrix.
+            RSparseMatrix A;
+            //! Mass matrix (modal analysis and initial acceleration).
+            RSparseMatrix M;
+            //! Acceleration part of the Newmark predictor (initial acceleration).
+            RSparseMatrix D;
+            //! Right hand side.
+            RRVector b;
+            //! Initial equilibrium residual f - K*u - C*v (initial acceleration).
+            RRVector r;
+            //! Node load in global frame, 3 components per node.
+            RRVector f;
+        };
+
         //! Element modulus of elasticity vector.
         RRVector elementElasticityModulus;
         //! Element Poisson ratio.
@@ -18,6 +35,10 @@ class RSolverStress : public RSolverGeneric
         RRVector elementDensity;
         //! Element thermal expansion coefficient vector.
         RRVector elementThermalExpansion;
+        //! Element Rayleigh mass damping coefficient vector.
+        RRVector elementRayleighMass;
+        //! Element Rayleigh stiffness damping coefficient vector.
+        RRVector elementRayleighStiffness;
         //! Element environment temperature vector.
         RRVector elementEnvironmentTemperature;
         //! Number of constrained directions of each node, 0 to 3. They are the
@@ -31,6 +52,24 @@ class RSolverStress : public RSolverGeneric
         RSolverCartesianVector<RRVector> nodeDisplacement;
         //! Node initial displacement vector.
         RSolverCartesianVector<RRVector> nodeInitialDisplacement;
+        //! Node velocity vector.
+        RSolverCartesianVector<RRVector> nodeVelocity;
+        //! Node acceleration vector.
+        RSolverCartesianVector<RRVector> nodeAcceleration;
+        //! Node displacement at the beginning of the time step.
+        RSolverCartesianVector<RRVector> nodeDisplacementOld;
+        //! Node velocity at the beginning of the time step.
+        RSolverCartesianVector<RRVector> nodeVelocityOld;
+        //! Node acceleration at the beginning of the time step.
+        RSolverCartesianVector<RRVector> nodeAccelerationOld;
+        //! Node load of the current time step in global frame.
+        RSolverCartesianVector<RRVector> nodeLoad;
+        //! Node load of the previous time step in global frame.
+        RSolverCartesianVector<RRVector> nodeLoadOld;
+        //! True if nodeLoadOld holds the load of the previous time step.
+        bool nodeLoadOldValid;
+        //! Time step whose beginning is held in the *Old vectors.
+        uint oldStateTimeStep;
         //! Node force vector.
         RSolverCartesianVector<RRVector> nodeForce;
         //! Node pressure.
@@ -51,6 +90,23 @@ class RSolverStress : public RSolverGeneric
         RRVector d;
         //! Eigen vectors.
         RRMatrix ev;
+
+        //! Transient analysis is elastodynamic (Newmark / HHT time integration).
+        bool dynamic;
+        //! Initial acceleration has to be computed from equilibrium.
+        bool computeInitialAcceleration;
+        //! Newmark gamma.
+        double newmarkGamma;
+        //! Newmark beta.
+        double newmarkBeta;
+        //! Hilber-Hughes-Taylor alpha.
+        double hhtAlpha;
+        //! Time step size.
+        double timeStepSize;
+        //! Acceleration part of the Newmark predictor on free directions.
+        RSparseMatrix D;
+        //! Initial equilibrium residual on free directions.
+        RRVector r;
 
     public:
 
@@ -89,8 +145,36 @@ class RSolverStress : public RSolverGeneric
         //! Solve eigen-value problem.
         void solveEigenValue();
 
+        //! Return true if transient analysis is elastodynamic.
+        bool findDynamic() const;
+
+        //! Find Newmark and HHT time integration parameters.
+        void findTimeIntegrationParameters();
+
+        //! Apply initial displacement and velocity.
+        void applyInitialConditions();
+
+        //! Remember the state at the beginning of the time step.
+        void storeOldState();
+
+        //! Solve M*a = f - K*u - C*v for the initial acceleration and
+        //! correct the right hand side with it.
+        void solveInitialAcceleration();
+
+        //! Update velocity and acceleration from the new displacement.
+        void updateVelocityAndAcceleration();
+
         //! Set displacemen.
         void setDisplacement(const RRVector &v);
+
+        //! Convert solution vector in node frames to global node vectors.
+        void setNodeVector(const RRVector &v, RSolverCartesianVector<RRVector> &nodeVector, bool prescribed) const;
+
+        //! Store node vector variable.
+        void storeNodeVector(RVariableType variableType, const RSolverCartesianVector<RRVector> &nodeVector);
+
+        //! Lump mass matrix - diagonal scaling which preserves element mass.
+        static void lumpMassMatrix(RRMatrix &Me);
 
         //! Process solver results.
         void process() override;
@@ -122,7 +206,7 @@ class RSolverStress : public RSolverGeneric
         double findComponentValue(const RBoundaryCondition &bc, RVariableType variableType) const;
 
         //! Assembly matrix
-        void assemblyMatrix(unsigned int elementID, const RRMatrix &Me, const RRMatrix &Ke, const RRVector &fe, RSparseMatrix &Ap, RRVector &bp, RSparseMatrix &Mp);
+        void assemblyMatrix(unsigned int elementID, const RRMatrix &Me, const RRMatrix &Ke, const RRVector &fe, AssemblyBuffer &buffer);
 
         //! Apply local rotations to matrix.
         void applyLocalRotations(unsigned int elementID, RRMatrix &Ae);

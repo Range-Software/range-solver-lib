@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 
@@ -7,8 +8,40 @@
 #include "rmatrixsolver.h"
 #include "reigenvaluesolver.h"
 
+namespace
+{
+
+//! RElement::findJacobian() returns for a surface element a 3n x 2n matrix with
+//! the element frame in every node block. Rotating an element matrix between
+//! the element and the global frame needs the block diagonal part only - the
+//! off-diagonal blocks would add up the couplings of all node pairs.
+RRMatrix findSurfaceRotation(const RRMatrix &Rt)
+{
+    uint nn = Rt.getNRows() / 3;
+    RRMatrix R(3*nn,2*nn,0.0);
+    for (uint i=0;i<nn;i++)
+    {
+        for (uint r=0;r<3;r++)
+        {
+            R[3*i+r][2*i+0] = Rt[3*i+r][2*i+0];
+            R[3*i+r][2*i+1] = Rt[3*i+r][2*i+1];
+        }
+    }
+    return R;
+}
+
+}
+
 RSolverStress::RSolverStress(RModel *pModel, const QString &modelFileName, const QString &convergenceFileName, RSolverSharedData &sharedData, bool modalAnalysis)
     : RSolverGeneric(pModel,modelFileName,convergenceFileName,sharedData)
+    , nodeLoadOldValid(false)
+    , oldStateTimeStep(RConstants::eod)
+    , dynamic(false)
+    , computeInitialAcceleration(false)
+    , newmarkGamma(0.5)
+    , newmarkBeta(0.25)
+    , hhtAlpha(0.0)
+    , timeStepSize(0.0)
 {
     this->problemType = modalAnalysis ? R_PROBLEM_STRESS_MODAL : R_PROBLEM_STRESS;
 }
@@ -46,6 +79,14 @@ void RSolverStress::recover()
     this->recoverVariable(R_VARIABLE_FORCE,R_VARIABLE_APPLY_NODE,this->pModel->getNNodes(),1,this->nodeForce.y,0.0);
     this->recoverVariable(R_VARIABLE_FORCE,R_VARIABLE_APPLY_NODE,this->pModel->getNNodes(),2,this->nodeForce.z,0.0);
     this->recoverVariable(R_VARIABLE_PRESSURE,R_VARIABLE_APPLY_NODE,this->pModel->getNNodes(),0,this->nodePressure,0.0);
+    // Velocity and acceleration carry the Newmark state over to the next time
+    // step and over a restart.
+    this->recoverVariable(R_VARIABLE_STRUCTURAL_VELOCITY,R_VARIABLE_APPLY_NODE,this->pModel->getNNodes(),0,this->nodeVelocity.x,0.0);
+    this->recoverVariable(R_VARIABLE_STRUCTURAL_VELOCITY,R_VARIABLE_APPLY_NODE,this->pModel->getNNodes(),1,this->nodeVelocity.y,0.0);
+    this->recoverVariable(R_VARIABLE_STRUCTURAL_VELOCITY,R_VARIABLE_APPLY_NODE,this->pModel->getNNodes(),2,this->nodeVelocity.z,0.0);
+    this->recoverVariable(R_VARIABLE_STRUCTURAL_ACCELERATION,R_VARIABLE_APPLY_NODE,this->pModel->getNNodes(),0,this->nodeAcceleration.x,0.0);
+    this->recoverVariable(R_VARIABLE_STRUCTURAL_ACCELERATION,R_VARIABLE_APPLY_NODE,this->pModel->getNNodes(),1,this->nodeAcceleration.y,0.0);
+    this->recoverVariable(R_VARIABLE_STRUCTURAL_ACCELERATION,R_VARIABLE_APPLY_NODE,this->pModel->getNNodes(),2,this->nodeAcceleration.z,0.0);
 
 //    this->syncShared("node-displacement-x",this->nodeDisplacement.x);
 //    this->syncShared("node-displacement-y",this->nodeDisplacement.y);
@@ -55,7 +96,10 @@ void RSolverStress::recover()
 
 void RSolverStress::prepare()
 {
-    const bool needsMass = this->pModel->getTimeSolver().getEnabled() || this->problemType == R_PROBLEM_STRESS_MODAL;
+    this->dynamic = this->findDynamic();
+    this->computeInitialAcceleration = false;
+
+    const bool needsMass = this->dynamic || this->problemType == R_PROBLEM_STRESS_MODAL;
 
     //! Element force vector.
     RSolverCartesianVector<RRVector> elementForce;
@@ -100,29 +144,50 @@ void RSolverStress::prepare()
     this->generateMaterialVecor(RMaterialProperty::Density,this->elementDensity);
     this->generateMaterialVecor(RMaterialProperty::ThermalExpansionCoefficient,this->elementThermalExpansion);
     this->generateVariableVector(R_VARIABLE_TEMPERATURE,this->elementEnvironmentTemperature,temperatureSetValues,false,false,true);
+    this->generateMaterialVecor(RMaterialProperty::RayleighMassDamping,this->elementRayleighMass);
+    this->generateMaterialVecor(RMaterialProperty::RayleighStiffnessDamping,this->elementRayleighStiffness);
+
+    if (this->dynamic)
+    {
+        this->findTimeIntegrationParameters();
+        if (this->firstRun)
+        {
+            this->applyInitialConditions();
+        }
+        this->storeOldState();
+    }
+
+    uint nn = this->pModel->getNNodes();
 
     this->b.resize(this->nodeBook.getNEnabled());
     this->x.resize(this->nodeBook.getNEnabled());
 
     this->M.clear();
     this->M.setNRows(this->b.size());
+    this->D.clear();
+    this->D.setNRows(this->computeInitialAcceleration ? this->b.size() : 0);
     this->A.clear();
     this->A.setNRows(this->b.size());
     this->b.fill(0.0);
     this->x.fill(0.0);
+    this->r.resize(this->computeInitialAcceleration ? this->b.size() : 0);
+    this->r.fill(0.0);
 
     // Per-thread assembly buffers - elements are assembled without
     // synchronization and merged into A/b (and M for modal) at the end.
     int np = omp_get_max_threads();
-    std::vector<RSparseMatrix> Ap(np);
-    std::vector<RSparseMatrix> Mp(np);
-    std::vector<RRVector> bp(np);
+    std::vector<AssemblyBuffer> buffers(np);
     for (int t=0;t<np;t++)
     {
-        Ap[t].setNRows(this->b.size());
-        Mp[t].setNRows(this->b.size());
-        bp[t].resize(this->b.size());
-        bp[t].fill(0.0);
+        buffers[t].A.setNRows(this->b.size());
+        buffers[t].M.setNRows(this->b.size());
+        buffers[t].D.setNRows(this->D.getNRows());
+        buffers[t].b.resize(this->b.size(),0.0);
+        buffers[t].b.fill(0.0);
+        buffers[t].r.resize(this->r.size(),0.0);
+        buffers[t].r.fill(0.0);
+        buffers[t].f.resize(this->dynamic ? 3*nn : 0,0.0);
+        buffers[t].f.fill(0.0);
     }
 
     this->pModel->convertElementToNodeVector(elementForce.x,forceSetValues.x,this->nodeForce.x,true);
@@ -221,7 +286,7 @@ void RSolverStress::prepare()
                     Me *= this->elementDensity[elementID] * pointVolume;
                 }
 
-                this->assemblyMatrix(elementID,Me,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())],Mp[uint(omp_get_thread_num())]);
+                this->assemblyMatrix(elementID,Me,Ke,fe,buffers[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -358,7 +423,7 @@ void RSolverStress::prepare()
 
                     }
                 }
-                this->assemblyMatrix(elementID,Me,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())],Mp[uint(omp_get_thread_num())]);
+                this->assemblyMatrix(elementID,Me,Ke,fe,buffers[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -442,7 +507,12 @@ void RSolverStress::prepare()
                     const RRMatrix &dN = shapeFunc.getDN();
                     RRMatrix J, Rt, RtT;
                     double detJ = element.findJacobian(this->pModel->getNodes(),k,J,Rt);
+                    Rt = findSurfaceRotation(Rt);
                     RtT.transpose(Rt);
+
+                    // Mass of this integration point only - it is rotated to the
+                    // global frame and added to Me below.
+                    Met.fill(0.0);
 
                     if (surfaceThickness > 0.0)
                     {
@@ -461,11 +531,14 @@ void RSolverStress::prepare()
                         }
                         BeT.transpose(Be);
 
+                        // Ke += Rt * B * D * B^T * Rt^T * t * detJ * W,
+                        // accumulated over the integration points. The thickness
+                        // enters as it does for the mass and the thermal load.
                         RRMatrix::mlt(Be,De,BeD);
                         RRMatrix::mlt(BeD,BeT,Ket);
+                        Ket *= surfaceThickness * detJ * shapeFunc.getW();
                         RRMatrix::mlt(Rt,Ket,KeRt);
-                        RRMatrix::mlt(KeRt,RtT,Ke);
-                        Ke *= detJ * shapeFunc.getW();
+                        RRMatrix::mlt(KeRt,RtT,Ke,true);
                     }
 
                     for (uint m=0;m<element.size();m++)
@@ -514,19 +587,23 @@ void RSolverStress::prepare()
                             fe[3*m+2] += elementGravity.z[elementID] * this->elementDensity[elementID] * surfaceThickness * integValue;
                         }
 
-                        // Thermal expansion
+                        // Thermal expansion - f = B^T * D * eps_th. In plane
+                        // strain the free out of plane expansion is suppressed,
+                        // which raises the in-plane thermal strain to
+                        // (1+v)*alpha*dT, and there is no thermal shear strain.
                         if (surfaceThickness > 0.0)
                         {
+                            double thermalStrain = (1.0 + v) * this->elementThermalExpansion[elementID] * dT;
                             fet.fill(0.0);
-                            for (uint n=0;n<3;n++)
+                            for (uint n=0;n<2;n++)
                             {
-                                fet[2*m+0] += this->elementThermalExpansion[elementID] * dT * BeD[2*m+0][n] * surfaceThickness * detJ * shapeFunc.getW();
-                                fet[2*m+1] += this->elementThermalExpansion[elementID] * dT * BeD[2*m+1][n] * surfaceThickness * detJ * shapeFunc.getW();
+                                fet[2*m+0] += thermalStrain * BeD[2*m+0][n] * surfaceThickness * detJ * shapeFunc.getW();
+                                fet[2*m+1] += thermalStrain * BeD[2*m+1][n] * surfaceThickness * detJ * shapeFunc.getW();
                             }
 
-                            fe[3*m+0] += Rt[3*m+0][0]*fet[2*m+0] + Rt[3*m+0][1]*fet[2*m+1];
-                            fe[3*m+1] += Rt[3*m+1][0]*fet[2*m+0] + Rt[3*m+1][1]*fet[2*m+1];
-                            fe[3*m+2] += Rt[3*m+2][0]*fet[2*m+0] + Rt[3*m+2][1]*fet[2*m+1];
+                            fe[3*m+0] += Rt[3*m+0][2*m+0]*fet[2*m+0] + Rt[3*m+0][2*m+1]*fet[2*m+1];
+                            fe[3*m+1] += Rt[3*m+1][2*m+0]*fet[2*m+0] + Rt[3*m+1][2*m+1]*fet[2*m+1];
+                            fe[3*m+2] += Rt[3*m+2][2*m+0]*fet[2*m+0] + Rt[3*m+2][2*m+1]*fet[2*m+1];
                         }
                     }
 
@@ -542,7 +619,7 @@ void RSolverStress::prepare()
                         Ke.fill(0.0);
                     }
                 }
-                this->assemblyMatrix(elementID,Me,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())],Mp[uint(omp_get_thread_num())]);
+                this->assemblyMatrix(elementID,Me,Ke,fe,buffers[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -681,7 +758,7 @@ void RSolverStress::prepare()
                         }
                     }
                 }
-                this->assemblyMatrix(elementID,Me,Ke,fe,Ap[uint(omp_get_thread_num())],bp[uint(omp_get_thread_num())],Mp[uint(omp_get_thread_num())]);
+                this->assemblyMatrix(elementID,Me,Ke,fe,buffers[uint(omp_get_thread_num())]);
             }
             catch (const RError &rError)
             {
@@ -704,9 +781,64 @@ void RSolverStress::prepare()
     {
         for (int t=0;t<np;t++)
         {
-            this->A.getVector(uint(i)).addVector(Ap[t].getVector(uint(i)));
-            this->M.getVector(uint(i)).addVector(Mp[t].getVector(uint(i)));
-            this->b[uint(i)] += bp[t][uint(i)];
+            this->A.getVector(uint(i)).addVector(buffers[t].A.getVector(uint(i)));
+            this->M.getVector(uint(i)).addVector(buffers[t].M.getVector(uint(i)));
+            this->b[uint(i)] += buffers[t].b[uint(i)];
+            if (this->computeInitialAcceleration)
+            {
+                this->D.getVector(uint(i)).addVector(buffers[t].D.getVector(uint(i)));
+                this->r[uint(i)] += buffers[t].r[uint(i)];
+            }
+        }
+    }
+
+    if (this->dynamic)
+    {
+        this->nodeLoad.x.resize(nn,0.0);
+        this->nodeLoad.y.resize(nn,0.0);
+        this->nodeLoad.z.resize(nn,0.0);
+        this->nodeLoad.x.fill(0.0);
+        this->nodeLoad.y.fill(0.0);
+        this->nodeLoad.z.fill(0.0);
+        for (int t=0;t<np;t++)
+        {
+            for (uint i=0;i<nn;i++)
+            {
+                this->nodeLoad.x[i] += buffers[t].f[3*i+0];
+                this->nodeLoad.y[i] += buffers[t].f[3*i+1];
+                this->nodeLoad.z[i] += buffers[t].f[3*i+2];
+            }
+        }
+
+        // HHT load term -alpha*f(n). The load of the current time step enters
+        // the element vectors as (1+alpha)*f(n+1). Without the load of the
+        // previous step (first step, restart) the load is taken as constant
+        // over the step.
+        if (this->hhtAlpha != 0.0)
+        {
+            const RSolverCartesianVector<RRVector> &fOld = this->nodeLoadOldValid ? this->nodeLoadOld : this->nodeLoad;
+            for (uint i=0;i<nn;i++)
+            {
+                RR3Vector fg(fOld.x[i],fOld.y[i],fOld.z[i]);
+                RR3Vector fl(fg);
+                if (this->localRotations[i].isActive())
+                {
+                    // f_local = R^T * f_global, see applyLocalRotations().
+                    const RRMatrix &R = this->localRotations[i].getR();
+                    for (uint c=0;c<3;c++)
+                    {
+                        fl[c] = R[0][c]*fg[0] + R[1][c]*fg[1] + R[2][c]*fg[2];
+                    }
+                }
+                for (uint c=0;c<3;c++)
+                {
+                    uint position;
+                    if (this->nodeBook.getValue(3*i+c,position))
+                    {
+                        this->b[position] -= this->hhtAlpha * fl[c];
+                    }
+                }
+            }
         }
     }
 
@@ -741,11 +873,17 @@ void RSolverStress::solve()
 
 void RSolverStress::solveStressStrain()
 {
+    if (this->computeInitialAcceleration)
+    {
+        this->solveInitialAcceleration();
+    }
+
     RLogger::info("Solving stress-strain problem.\n");
 
     try
     {
         RLogger::indent();
+        // K + a0*M + a1*C is symmetric positive definite just as K is.
         RMatrixSolver matrixSolver(this->pModel->getMatrixSolverConf(RMatrixSolverConf::CG));
         matrixSolver.solve(this->A,this->b,this->x,R_MATRIX_PRECONDITIONER_JACOBI,3);
         RLogger::unindent();
@@ -757,6 +895,382 @@ void RSolverStress::solveStressStrain()
     }
 
     this->setDisplacement(this->x);
+
+    if (this->dynamic)
+    {
+        this->updateVelocityAndAcceleration();
+    }
+}
+
+bool RSolverStress::findDynamic() const
+{
+    return (this->problemType == R_PROBLEM_STRESS &&
+            this->pModel->getTimeSolver().getEnabled() &&
+            this->pModel->getProblemSetup().getStressSetup().getTransientType() == R_STRESS_TRANSIENT_DYNAMIC);
+}
+
+void RSolverStress::findTimeIntegrationParameters()
+{
+    this->timeStepSize = this->pModel->getTimeSolver().getCurrentTimeStepSize();
+    if (this->timeStepSize < RConstants::eps)
+    {
+        throw RError(RError::Type::Application,R_ERROR_REF,"Dynamic stress analysis requires a positive time step size.");
+    }
+
+    this->hhtAlpha = this->pModel->getProblemSetup().getStressSetup().getHhtAlpha();
+    this->hhtAlpha = std::min(std::max(this->hhtAlpha,R_STRESS_HHT_ALPHA_MIN_VALUE),R_STRESS_HHT_ALPHA_MAX_VALUE);
+
+    if (this->hhtAlpha < 0.0)
+    {
+        // Hilber-Hughes-Taylor - second order accurate, unconditionally stable
+        // and dissipative in the high frequencies.
+        this->newmarkGamma = 0.5 - this->hhtAlpha;
+        this->newmarkBeta = std::pow(1.0 - this->hhtAlpha,2) / 4.0;
+    }
+    else
+    {
+        // The time-march approximation coefficient is 1.0 for the backward, 0.5
+        // for the central and 0.0 for the forward approximation. Newmark with
+        // gamma = 1/2 requires beta >= 1/4 for unconditional stability, so the
+        // coefficient is clamped to the average-acceleration scheme, the same
+        // way as in the acoustic solver.
+        this->newmarkGamma = 0.5;
+        this->newmarkBeta = std::max(this->pModel->getTimeSolver().getTimeMarchApproximationCoefficient() / 2.0,0.25);
+    }
+}
+
+void RSolverStress::applyInitialConditions()
+{
+    uint nn = this->pModel->getNNodes();
+
+    // A new analysis starts from rest unless initial conditions say otherwise.
+    this->nodeDisplacement.x.resize(nn,0.0);
+    this->nodeDisplacement.y.resize(nn,0.0);
+    this->nodeDisplacement.z.resize(nn,0.0);
+    this->nodeDisplacement.x.fill(0.0);
+    this->nodeDisplacement.y.fill(0.0);
+    this->nodeDisplacement.z.fill(0.0);
+    this->nodeVelocity.x.resize(nn,0.0);
+    this->nodeVelocity.y.resize(nn,0.0);
+    this->nodeVelocity.z.resize(nn,0.0);
+    this->nodeVelocity.x.fill(0.0);
+    this->nodeVelocity.y.fill(0.0);
+    this->nodeVelocity.z.fill(0.0);
+    this->nodeAcceleration.x.resize(nn,0.0);
+    this->nodeAcceleration.y.resize(nn,0.0);
+    this->nodeAcceleration.z.resize(nn,0.0);
+    this->nodeAcceleration.x.fill(0.0);
+    this->nodeAcceleration.y.fill(0.0);
+    this->nodeAcceleration.z.fill(0.0);
+
+    RSolverCartesianVector<RRVector> elementValues;
+    RSolverCartesianVector<RBVector> setValues;
+
+    this->generateVariableVector(R_VARIABLE_DISPLACEMENT_X,elementValues.x,setValues.x,false,true,false);
+    this->generateVariableVector(R_VARIABLE_DISPLACEMENT_Y,elementValues.y,setValues.y,false,true,false);
+    this->generateVariableVector(R_VARIABLE_DISPLACEMENT_Z,elementValues.z,setValues.z,false,true,false);
+    this->pModel->convertElementToNodeVector(elementValues.x,setValues.x,this->nodeDisplacement.x,true);
+    this->pModel->convertElementToNodeVector(elementValues.y,setValues.y,this->nodeDisplacement.y,true);
+    this->pModel->convertElementToNodeVector(elementValues.z,setValues.z,this->nodeDisplacement.z,true);
+
+    this->generateVariableVector(R_VARIABLE_STRUCTURAL_VELOCITY_X,elementValues.x,setValues.x,false,true,false);
+    this->generateVariableVector(R_VARIABLE_STRUCTURAL_VELOCITY_Y,elementValues.y,setValues.y,false,true,false);
+    this->generateVariableVector(R_VARIABLE_STRUCTURAL_VELOCITY_Z,elementValues.z,setValues.z,false,true,false);
+    this->pModel->convertElementToNodeVector(elementValues.x,setValues.x,this->nodeVelocity.x,true);
+    this->pModel->convertElementToNodeVector(elementValues.y,setValues.y,this->nodeVelocity.y,true);
+    this->pModel->convertElementToNodeVector(elementValues.z,setValues.z,this->nodeVelocity.z,true);
+
+    // Constrained directions follow the prescribed displacement and cannot be
+    // given a velocity of their own.
+    for (uint i=0;i<nn;i++)
+    {
+        uint nConstrained = this->nodeConstrainedDirections[i];
+        if (nConstrained == 0)
+        {
+            continue;
+        }
+
+        RR3Vector vg(this->nodeVelocity.x[i],this->nodeVelocity.y[i],this->nodeVelocity.z[i]);
+        RR3Vector vl(vg);
+
+        if (this->localRotations[i].isActive())
+        {
+            // v_local = R^T * v_global, see applyLocalRotations().
+            const RRMatrix &R = this->localRotations[i].getR();
+            for (uint c=0;c<3;c++)
+            {
+                vl[c] = R[0][c]*vg[0] + R[1][c]*vg[1] + R[2][c]*vg[2];
+            }
+            for (uint c=0;c<nConstrained;c++)
+            {
+                vl[c] = 0.0;
+            }
+            for (uint c=0;c<3;c++)
+            {
+                vg[c] = R[c][0]*vl[0] + R[c][1]*vl[1] + R[c][2]*vl[2];
+            }
+        }
+        else
+        {
+            for (uint c=0;c<nConstrained;c++)
+            {
+                vg[c] = 0.0;
+            }
+        }
+
+        this->nodeVelocity.x[i] = vg[0];
+        this->nodeVelocity.y[i] = vg[1];
+        this->nodeVelocity.z[i] = vg[2];
+    }
+}
+
+void RSolverStress::storeOldState()
+{
+    uint timeStep = this->pModel->getTimeSolver().getCurrentTimeStep();
+
+    // A task group may run the solver several times within one time step. The
+    // state at the beginning of the step must then stay as it was.
+    if (timeStep == this->oldStateTimeStep && !this->firstRun)
+    {
+        return;
+    }
+
+    uint nn = this->pModel->getNNodes();
+
+    this->nodeLoadOldValid = (this->oldStateTimeStep != RConstants::eod && this->nodeLoad.x.size() == nn);
+    if (this->nodeLoadOldValid)
+    {
+        this->nodeLoadOld = this->nodeLoad;
+    }
+
+    this->nodeDisplacementOld = this->nodeDisplacement;
+    this->nodeVelocityOld = this->nodeVelocity;
+    this->nodeAccelerationOld = this->nodeAcceleration;
+    this->oldStateTimeStep = timeStep;
+
+    // At the very beginning the acceleration follows from the equilibrium
+    // M*a = f - K*u - C*v. Otherwise a suddenly applied load starts with a
+    // wrong acceleration which the non-dissipative scheme never forgets.
+    this->computeInitialAcceleration = this->firstRun;
+}
+
+void RSolverStress::solveInitialAcceleration()
+{
+    RLogger::info("Solving initial acceleration.\n");
+
+    uint n = this->M.getNRows();
+
+    // Directions without mass (zero density, massless truss directions) carry
+    // no inertia - their initial acceleration is set to zero.
+    double maxDiagonal = 0.0;
+    RRVector diagonal(n,0.0);
+    for (uint i=0;i<n;i++)
+    {
+        uint position;
+        if (this->M.getVector(i).findPosition(i,position))
+        {
+            diagonal[i] = this->M.getVector(i).getValue(position);
+        }
+        maxDiagonal = std::max(maxDiagonal,diagonal[i]);
+    }
+
+    RRVector a(n,0.0);
+
+    if (maxDiagonal > 0.0)
+    {
+        for (uint i=0;i<n;i++)
+        {
+            if (diagonal[i] <= RConstants::eps * maxDiagonal)
+            {
+                this->M.addValue(i,i,maxDiagonal);
+                this->r[i] = 0.0;
+            }
+        }
+
+        try
+        {
+            RLogger::indent();
+            RMatrixSolver matrixSolver(this->pModel->getMatrixSolverConf(RMatrixSolverConf::CG));
+            matrixSolver.solve(this->M,this->r,a,R_MATRIX_PRECONDITIONER_JACOBI,3);
+            RLogger::unindent();
+        }
+        catch (const RError &error)
+        {
+            RLogger::unindent();
+            throw RError(RError::Type::Application,R_ERROR_REF,"Failed to solve initial acceleration. %s", error.getMessage().toUtf8().constData());
+        }
+
+        // The predictor was assembled with zero initial acceleration.
+        RRVector Da;
+        RSparseMatrix::mlt(this->D,a,Da);
+        for (uint i=0;i<n;i++)
+        {
+            this->b[i] += Da[i];
+        }
+    }
+
+    // Constrained directions start without acceleration.
+    this->setNodeVector(a,this->nodeAccelerationOld,false);
+    this->computeInitialAcceleration = false;
+}
+
+void RSolverStress::updateVelocityAndAcceleration()
+{
+    const double gamma = this->newmarkGamma;
+    const double beta = this->newmarkBeta;
+    const double dt = this->timeStepSize;
+
+    const double a0 = 1.0 / (beta * std::pow(dt,2));
+    const double a2 = 1.0 / (beta * dt);
+    const double a3 = (1.0 / (2.0 * beta)) - 1.0;
+    const double a6 = dt * (1.0 - gamma);
+    const double a7 = dt * gamma;
+
+    uint nn = this->pModel->getNNodes();
+
+    this->nodeVelocity.x.resize(nn,0.0);
+    this->nodeVelocity.y.resize(nn,0.0);
+    this->nodeVelocity.z.resize(nn,0.0);
+    this->nodeAcceleration.x.resize(nn,0.0);
+    this->nodeAcceleration.y.resize(nn,0.0);
+    this->nodeAcceleration.z.resize(nn,0.0);
+
+    RRVector *pU[3] = { &this->nodeDisplacement.x, &this->nodeDisplacement.y, &this->nodeDisplacement.z };
+    const RRVector *pUo[3] = { &this->nodeDisplacementOld.x, &this->nodeDisplacementOld.y, &this->nodeDisplacementOld.z };
+    const RRVector *pVo[3] = { &this->nodeVelocityOld.x, &this->nodeVelocityOld.y, &this->nodeVelocityOld.z };
+    const RRVector *pAo[3] = { &this->nodeAccelerationOld.x, &this->nodeAccelerationOld.y, &this->nodeAccelerationOld.z };
+    RRVector *pV[3] = { &this->nodeVelocity.x, &this->nodeVelocity.y, &this->nodeVelocity.z };
+    RRVector *pA[3] = { &this->nodeAcceleration.x, &this->nodeAcceleration.y, &this->nodeAcceleration.z };
+
+    for (uint c=0;c<3;c++)
+    {
+        for (uint i=0;i<nn;i++)
+        {
+            double uo = (*pUo[c])[i];
+            double vo = (*pVo[c])[i];
+            double ao = (*pAo[c])[i];
+            double u = (*pU[c])[i];
+
+            double a = a0 * (u - uo) - a2 * vo - a3 * ao;
+            double v = vo + a6 * ao + a7 * a;
+
+            (*pA[c])[i] = a;
+            (*pV[c])[i] = v;
+        }
+    }
+}
+
+void RSolverStress::setNodeVector(const RRVector &v, RSolverCartesianVector<RRVector> &nodeVector, bool prescribed) const
+{
+    uint nn = this->pModel->getNNodes();
+
+    nodeVector.x.resize(nn,0.0);
+    nodeVector.y.resize(nn,0.0);
+    nodeVector.z.resize(nn,0.0);
+
+    for (uint i=0;i<nn;i++)
+    {
+        uint position;
+        RR3Vector du(0.0,0.0,0.0);
+
+        for (uint c=0;c<3;c++)
+        {
+            if (this->nodeBook.getValue(3*i+c,position))
+            {
+                du[c] = v[position];
+            }
+            else if (prescribed)
+            {
+                du[c] = this->nodePrescribedDisplacement[i][c];
+            }
+        }
+
+        if (this->localRotations[i].isActive())
+        {
+            this->localRotations[i].rotateResultsVector(du);
+        }
+
+        nodeVector.x[i] = du[0];
+        nodeVector.y[i] = du[1];
+        nodeVector.z[i] = du[2];
+    }
+}
+
+void RSolverStress::storeNodeVector(RVariableType variableType, const RSolverCartesianVector<RRVector> &nodeVector)
+{
+    uint nn = this->pModel->getNNodes();
+
+    uint variablePos = this->pModel->findVariable(variableType);
+    if (variablePos == RConstants::eod)
+    {
+        variablePos = this->pModel->addVariable(variableType);
+
+        double vmin = 0.0;
+        double vmax = 0.0;
+        for (uint i=0;i<nn;i++)
+        {
+            double v = RR3Vector(nodeVector.x[i],nodeVector.y[i],nodeVector.z[i]).length();
+            if (i == 0)
+            {
+                vmin = vmax = v;
+            }
+            else
+            {
+                vmin = std::min(vmin,v);
+                vmax = std::max(vmax,v);
+            }
+        }
+
+        this->pModel->getVariable(variablePos).getVariableData().setMinMaxDisplayValue(vmin,vmax);
+    }
+    RVariable &variable = this->pModel->getVariable(variablePos);
+
+    variable.setApplyType(R_VARIABLE_APPLY_NODE);
+    variable.resize(3,nn);
+    for (uint i=0;i<nn;i++)
+    {
+        variable.setValue(0,i,nodeVector.x[i]);
+        variable.setValue(1,i,nodeVector.y[i]);
+        variable.setValue(2,i,nodeVector.z[i]);
+    }
+}
+
+void RSolverStress::lumpMassMatrix(RRMatrix &Me)
+{
+    // Row sum lumping gives negative masses on corner nodes of quadratic
+    // elements. Scaling the diagonal of the consistent matrix to the element
+    // mass (HRZ lumping) stays positive for every element type.
+    uint nn = Me.getNRows() / 3;
+
+    for (uint d=0;d<3;d++)
+    {
+        double totalMass = 0.0;
+        double diagonalMass = 0.0;
+        for (uint m=0;m<nn;m++)
+        {
+            diagonalMass += Me[3*m+d][3*m+d];
+            for (uint n=0;n<nn;n++)
+            {
+                totalMass += Me[3*m+d][3*n+d];
+            }
+        }
+        double scale = (diagonalMass > 0.0) ? totalMass / diagonalMass : 0.0;
+        for (uint m=0;m<nn;m++)
+        {
+            Me[3*m+d][3*m+d] *= scale;
+        }
+    }
+
+    for (uint p=0;p<Me.getNRows();p++)
+    {
+        for (uint q=0;q<Me.getNColumns();q++)
+        {
+            if (p != q)
+            {
+                Me[p][q] = 0.0;
+            }
+        }
+    }
 }
 
 void RSolverStress::solveEigenValue()
@@ -953,6 +1467,7 @@ void RSolverStress::process()
                 }
 
                 double dT = this->elementTemperature[elementID] - this->elementEnvironmentTemperature[elementID];
+                RRVector feThermal(element.size()*3,0.0);
 
                 for (uint k=0;k<nInp;k++)
                 {
@@ -977,6 +1492,17 @@ void RSolverStress::process()
                     BeScaled *= De * detJ * shapeFunc.getW();
                     RRMatrix::mlt(BeScaled,BeT,Ke,true);
 
+                    // Same thermal load as the one assembled in prepare().
+                    double thermalFactor = De
+                                         * this->elementThermalExpansion[elementID]
+                                         * dT
+                                         * detJ
+                                         * shapeFunc.getW();
+                    for (uint m=0;m<3*element.size();m++)
+                    {
+                        feThermal[m] += thermalFactor * Be[m][0];
+                    }
+
                     double integValue = 1.0/double(nInp);
 
                     // Element level stress. The axial strain follows from the
@@ -991,9 +1517,14 @@ void RSolverStress::process()
                     QeN += E * (axialStrain - this->elementThermalExpansion[elementID] * dT) * integValue;
                 }
 
-                // Nodal force is the internal elastic force K*u. There is no
-                // acceleration state in the formulation, so no inertia term.
+                // Nodal force is the internal elastic force K*u - f_thermal.
+                // There is no acceleration state in the formulation, so no
+                // inertia term.
                 RRMatrix::mlt(Ke,xe,fe);
+                for (uint n=0;n<fe.size();n++)
+                {
+                    fe[n] -= feThermal[n];
+                }
 
                 #pragma omp critical
                 {
@@ -1058,7 +1589,7 @@ void RSolverStress::process()
                 const RElement &element = this->pModel->getElement(elementID);
                 R_ERROR_ASSERT(R_ELEMENT_TYPE_IS_SURFACE(element.getType()));
                 uint nInp = RElement::getNIntegrationPoints(element.getType());
-                RRMatrix Ke(element.size()*2,element.size()*2,0.0);
+                RRMatrix Ke(element.size()*3,element.size()*3,0.0);
                 RRVector fe(element.size()*3,0.0);
                 RRVector xe(element.size()*3,0.0);
                 RRVector Qe(3,0.0);
@@ -1110,6 +1641,10 @@ void RSolverStress::process()
                 }
 
                 double dT = this->elementTemperature[elementID] - this->elementEnvironmentTemperature[elementID];
+                // Plane strain - see the thermal load in prepare().
+                double thermalStrain = (1.0 + v) * this->elementThermalExpansion[elementID] * dT;
+                // Thermal load in the global frame.
+                RRVector feThermal(element.size()*3,0.0);
 
                 for (uint k=0;k<nInp;k++)
                 {
@@ -1118,6 +1653,7 @@ void RSolverStress::process()
                     const RRMatrix &dN = shapeFunc.getDN();
                     RRMatrix J, Rt, RtT;
                     double detJ = element.findJacobian(this->pModel->getNodes(),k,J,Rt);
+                    Rt = findSurfaceRotation(Rt);
                     RtT.transpose(Rt);
 
                     B.fill(0.0);
@@ -1137,13 +1673,15 @@ void RSolverStress::process()
 
                     RRMatrix::mlt(Be,De,BeD);
                     RRMatrix::mlt(BeD,BeT,Ket);
+                    // Same stiffness as assembled in prepare(), accumulated over
+                    // the integration points.
+                    Ket *= surfaceThickness * detJ * shapeFunc.getW();
                     RRMatrix::mlt(Rt,Ket,KeRt);
-                    RRMatrix::mlt(KeRt,RtT,Ke);
-                    Ke *= detJ * shapeFunc.getW();
+                    RRMatrix::mlt(KeRt,RtT,Ke,true);
 
                     double integValue = 1.0/double(nInp);
 
-                    // Element level stress.
+                    // Element level stress D*B*u.
                     for (uint m=0;m<element.size();m++)
                     {
                         for (uint n=0;n<3;n++)
@@ -1151,17 +1689,38 @@ void RSolverStress::process()
                             Qe[n] += BeD[2*m+0][n] * lxe[2*m+0] * integValue
                                   +  BeD[2*m+1][n] * lxe[2*m+1] * integValue;
                         }
+
+                        double fl0 = 0.0;
+                        double fl1 = 0.0;
                         for (uint n=0;n<2;n++)
                         {
-                            Qe[0] -= BeD[2*m+0][n] * this->elementThermalExpansion[elementID] * dT * surfaceThickness * integValue;
-                            Qe[1] -= BeD[2*m+1][n] * this->elementThermalExpansion[elementID] * dT * surfaceThickness * integValue;
+                            fl0 += thermalStrain * BeD[2*m+0][n] * surfaceThickness * detJ * shapeFunc.getW();
+                            fl1 += thermalStrain * BeD[2*m+1][n] * surfaceThickness * detJ * shapeFunc.getW();
+                        }
+                        for (uint c=0;c<3;c++)
+                        {
+                            feThermal[3*m+c] += Rt[3*m+c][2*m+0]*fl0 + Rt[3*m+c][2*m+1]*fl1;
                         }
                     }
                 }
 
-                // Nodal force is the internal elastic force K*u. There is no
-                // acceleration state in the formulation, so no inertia term.
+                // Thermal stress -D*eps_th, eps_th = thermalStrain * (1,1,0).
+                // The stress is uniform over the element, so it is subtracted
+                // once and not per node - the shape function derivatives of
+                // all nodes sum up to zero.
+                for (uint n=0;n<3;n++)
+                {
+                    Qe[n] -= thermalStrain * (De[n][0] + De[n][1]);
+                }
+
+                // Nodal force is the internal elastic force K*u - f_thermal.
+                // There is no acceleration state in the formulation, so no
+                // inertia term.
                 RRMatrix::mlt(Ke,xe,fe);
+                for (uint n=0;n<fe.size();n++)
+                {
+                    fe[n] -= feThermal[n];
+                }
 
                 QeN = std::sqrt(Qe[0] * Qe[0] + Qe[1] * Qe[1] - Qe[0] * Qe[1]);
                 QeS = std::sqrt(3.0 * Qe[2] * Qe[2]);
@@ -1251,6 +1810,8 @@ void RSolverStress::process()
                 De *= E/((1+v)*(1-2*v));
 
                 double dT = this->elementTemperature[elementID] - this->elementEnvironmentTemperature[elementID];
+                double thermalStrain = this->elementThermalExpansion[elementID] * dT;
+                RRVector feThermal(element.size()*3,0.0);
 
                 for (uint k=0;k<element.size();k++)
                 {
@@ -1309,18 +1870,33 @@ void RSolverStress::process()
                                   +  BeD[3*m+1][n] * this->nodeDisplacement.y[element.getNodeId(m)] * integValue
                                   +  BeD[3*m+2][n] * this->nodeDisplacement.z[element.getNodeId(m)] * integValue;
                         }
+                        // Thermal load B^T * D * eps_th, as in prepare().
                         for (uint n=0;n<3;n++)
                         {
-                            Qe[0] -= BeD[3*m+0][n] * this->elementThermalExpansion[elementID] * dT * integValue;
-                            Qe[1] -= BeD[3*m+1][n] * this->elementThermalExpansion[elementID] * dT * integValue;
-                            Qe[2] -= BeD[3*m+2][n] * this->elementThermalExpansion[elementID] * dT * integValue;
+                            feThermal[3*m+0] += thermalStrain * BeD[3*m+0][n] * detJ * shapeFunc.getW();
+                            feThermal[3*m+1] += thermalStrain * BeD[3*m+1][n] * detJ * shapeFunc.getW();
+                            feThermal[3*m+2] += thermalStrain * BeD[3*m+2][n] * detJ * shapeFunc.getW();
                         }
                     }
                 }
 
-                // Nodal force is the internal elastic force K*u. There is no
-                // acceleration state in the formulation, so no inertia term.
+                // Thermal stress -D*eps_th, eps_th = thermalStrain * (1,1,1,0,0,0).
+                // The stress is uniform over the element, so it is subtracted
+                // once and not per node - the shape function derivatives of
+                // all nodes sum up to zero.
+                for (uint n=0;n<6;n++)
+                {
+                    Qe[n] -= thermalStrain * (De[n][0] + De[n][1] + De[n][2]);
+                }
+
+                // Nodal force is the internal elastic force K*u - f_thermal.
+                // There is no acceleration state in the formulation, so no
+                // inertia term.
                 RRMatrix::mlt(Ke,xe,fe);
+                for (uint n=0;n<fe.size();n++)
+                {
+                    fe[n] -= feThermal[n];
+                }
 
                 double QeN = std::sqrt(Qe[0]*Qe[0] + Qe[1]*Qe[1] + Qe[2]*Qe[2] - (Qe[0]*Qe[1] + Qe[1]*Qe[2] + Qe[2]*Qe[0]));
                 double QeS = std::sqrt(3.0 * (Qe[3]*Qe[3] + Qe[4]*Qe[4] + Qe[5]*Qe[5]));
@@ -1404,6 +1980,14 @@ void RSolverStress::store()
         displacement.setValue(0,i,this->nodeDisplacement.x[i]);
         displacement.setValue(1,i,this->nodeDisplacement.y[i]);
         displacement.setValue(2,i,this->nodeDisplacement.z[i]);
+    }
+
+    if (this->dynamic)
+    {
+        // Velocity and acceleration - also carry the Newmark state over to the
+        // next time step.
+        this->storeNodeVector(R_VARIABLE_STRUCTURAL_VELOCITY,this->nodeVelocity);
+        this->storeNodeVector(R_VARIABLE_STRUCTURAL_ACCELERATION,this->nodeAcceleration);
     }
 
     // VonMises Stress
@@ -1520,7 +2104,7 @@ void RSolverStress::store()
             }
         }
 
-        this->pModel->getVariable(displacementPos).getVariableData().setMinMaxDisplayValue(fmin,fmax);
+        this->pModel->getVariable(forcePos).getVariableData().setMinMaxDisplayValue(fmin,fmax);
     }
     RVariable &force =  this->pModel->getVariable(forcePos);
 
@@ -1539,6 +2123,11 @@ void RSolverStress::store()
 void RSolverStress::statistics()
 {
     this->printStats(R_VARIABLE_DISPLACEMENT);
+    if (this->dynamic)
+    {
+        this->printStats(R_VARIABLE_STRUCTURAL_VELOCITY);
+        this->printStats(R_VARIABLE_STRUCTURAL_ACCELERATION);
+    }
     this->printStats(R_VARIABLE_STRESS_VON_MISES);
     this->printStats(R_VARIABLE_FORCE);
     this->processMonitoringPoints();
@@ -2039,54 +2628,105 @@ void RSolverStress::generateNodeBook()
     }
 }
 
-void RSolverStress::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRMatrix &Ke, const RRVector &fe, RSparseMatrix &Ap, RRVector &bp, RSparseMatrix &Mp)
+void RSolverStress::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRMatrix &Ke, const RRVector &fe, AssemblyBuffer &buffer)
 {
-    double alpha = this->pModel->getTimeSolver().getTimeMarchApproximationCoefficient();
-    double dt = this->pModel->getTimeSolver().getCurrentTimeStepSize();
-
     const RElement &rElement = this->pModel->getElement(elementID);
 
-    RRMatrix Ae(3*rElement.size(),3*rElement.size());
-    RRMatrix Be(3*rElement.size(),3*rElement.size());
-    RRVector be(3*rElement.size());
+    uint ne = 3*rElement.size();
+
+    RRMatrix Ae(ne,ne);
+    RRMatrix Be(ne,ne);
+    RRMatrix De(ne,ne);
+    RRVector be(ne);
+    RRVector re(ne);
 
     Ae.fill(0.0);
     Be.fill(0.0);
+    De.fill(0.0);
     be.fill(0.0);
+    re.fill(0.0);
 
-    if (this->pModel->getTimeSolver().getEnabled())
+    if (this->dynamic)
     {
-        for (unsigned m=0;m<rElement.size();m++)
+        // Newmark time integration of M*u'' + C*u' + K*u = f with the
+        // Hilber-Hughes-Taylor modification. Everything is assembled in the
+        // global frame and rotated to the node frames afterwards.
+        //
+        //   (a0*M + (1+alpha)*(K + a1*C)) * u(n+1) =
+        //       (1+alpha)*f(n+1) - alpha*f(n)
+        //     + M*(a0*u + a2*v + a3*a)
+        //     + (1+alpha)*C*(a1*u + a4*v + a5*a)
+        //     + alpha*(C*v + K*u)
+        //
+        // with u, v, a taken at the beginning of the step. The -alpha*f(n) term
+        // is added to the assembled system in prepare().
+        const double gamma = this->newmarkGamma;
+        const double beta = this->newmarkBeta;
+        const double alpha = this->hhtAlpha;
+        const double dt = this->timeStepSize;
+
+        const double a0 = 1.0 / (beta * std::pow(dt,2));
+        const double a1 = gamma / (beta * dt);
+        const double a2 = 1.0 / (beta * dt);
+        const double a3 = (1.0 / (2.0 * beta)) - 1.0;
+        const double a4 = (gamma / beta) - 1.0;
+        const double a5 = (1.0 / 2.0) * dt * ((gamma / beta) - 2.0);
+
+        RRMatrix Mm(Me);
+        if (this->pModel->getProblemSetup().getStressSetup().getLumpedMass())
         {
-            be[3*m+0] = dt * fe[3*m+0];
-            be[3*m+1] = dt * fe[3*m+1];
-            be[3*m+2] = dt * fe[3*m+2];
-            for (unsigned n=0;n<rElement.size();n++)
+            RSolverStress::lumpMassMatrix(Mm);
+        }
+
+        const double aM = this->elementRayleighMass[elementID];
+        const double aK = this->elementRayleighStiffness[elementID];
+
+        RRVector ue(ne), ve(ne), ae(ne);
+        for (uint n=0;n<rElement.size();n++)
+        {
+            uint nodeID = rElement.getNodeId(n);
+            ue[3*n+0] = this->nodeDisplacementOld.x[nodeID];
+            ue[3*n+1] = this->nodeDisplacementOld.y[nodeID];
+            ue[3*n+2] = this->nodeDisplacementOld.z[nodeID];
+            ve[3*n+0] = this->nodeVelocityOld.x[nodeID];
+            ve[3*n+1] = this->nodeVelocityOld.y[nodeID];
+            ve[3*n+2] = this->nodeVelocityOld.z[nodeID];
+            ae[3*n+0] = this->nodeAccelerationOld.x[nodeID];
+            ae[3*n+1] = this->nodeAccelerationOld.y[nodeID];
+            ae[3*n+2] = this->nodeAccelerationOld.z[nodeID];
+        }
+
+        for (uint p=0;p<ne;p++)
+        {
+            be[p] = (1.0 + alpha) * fe[p];
+            re[p] = fe[p];
+            for (uint q=0;q<ne;q++)
             {
-                Ae[3*m+0][3*n+0] = Me[3*m+0][3*n+0] + alpha * dt * Ke[3*m+0][3*n+0];
-                Ae[3*m+1][3*n+0] = Me[3*m+1][3*n+0] + alpha * dt * Ke[3*m+1][3*n+0];
-                Ae[3*m+2][3*n+0] = Me[3*m+2][3*n+0] + alpha * dt * Ke[3*m+2][3*n+0];
+                double Mpq = Mm[p][q];
+                double Kpq = Ke[p][q];
+                double Cpq = aM * Mpq + aK * Kpq;
 
-                Ae[3*m+0][3*n+1] = Me[3*m+0][3*n+1] + alpha * dt * Ke[3*m+0][3*n+1];
-                Ae[3*m+1][3*n+1] = Me[3*m+1][3*n+1] + alpha * dt * Ke[3*m+1][3*n+1];
-                Ae[3*m+2][3*n+1] = Me[3*m+2][3*n+1] + alpha * dt * Ke[3*m+2][3*n+1];
+                Ae[p][q] = a0 * Mpq + (1.0 + alpha) * (Kpq + a1 * Cpq);
 
-                Ae[3*m+0][3*n+2] = Me[3*m+0][3*n+2] + alpha * dt * Ke[3*m+0][3*n+2];
-                Ae[3*m+1][3*n+2] = Me[3*m+1][3*n+2] + alpha * dt * Ke[3*m+1][3*n+2];
-                Ae[3*m+2][3*n+2] = Me[3*m+2][3*n+2] + alpha * dt * Ke[3*m+2][3*n+2];
+                be[p] += Mpq * (a0 * ue[q] + a2 * ve[q] + a3 * ae[q])
+                      +  (1.0 + alpha) * Cpq * (a1 * ue[q] + a4 * ve[q] + a5 * ae[q])
+                      +  alpha * (Cpq * ve[q] + Kpq * ue[q]);
 
-                be[3*m+0] += (Me[3*m+0][3*n+0] - (1.0 - alpha) * dt * Ke[3*m+0][3*n+0]) * this->nodeDisplacement.x[rElement.getNodeId(n)]
-                          +  (Me[3*m+0][3*n+1] - (1.0 - alpha) * dt * Ke[3*m+0][3*n+1]) * this->nodeDisplacement.y[rElement.getNodeId(n)]
-                          +  (Me[3*m+0][3*n+2] - (1.0 - alpha) * dt * Ke[3*m+0][3*n+2]) * this->nodeDisplacement.z[rElement.getNodeId(n)];
-
-                be[3*m+1] += (Me[3*m+1][3*n+0] - (1.0 - alpha) * dt * Ke[3*m+1][3*n+0]) * this->nodeDisplacement.x[rElement.getNodeId(n)]
-                          +  (Me[3*m+1][3*n+1] - (1.0 - alpha) * dt * Ke[3*m+1][3*n+1]) * this->nodeDisplacement.y[rElement.getNodeId(n)]
-                          +  (Me[3*m+1][3*n+2] - (1.0 - alpha) * dt * Ke[3*m+1][3*n+2]) * this->nodeDisplacement.z[rElement.getNodeId(n)];
-
-                be[3*m+2] += (Me[3*m+2][3*n+0] - (1.0 - alpha) * dt * Ke[3*m+2][3*n+0]) * this->nodeDisplacement.x[rElement.getNodeId(n)]
-                          +  (Me[3*m+2][3*n+1] - (1.0 - alpha) * dt * Ke[3*m+2][3*n+1]) * this->nodeDisplacement.y[rElement.getNodeId(n)]
-                          +  (Me[3*m+2][3*n+2] - (1.0 - alpha) * dt * Ke[3*m+2][3*n+2]) * this->nodeDisplacement.z[rElement.getNodeId(n)];
+                if (this->computeInitialAcceleration)
+                {
+                    Be[p][q] = Mpq;
+                    De[p][q] = a3 * Mpq + (1.0 + alpha) * a5 * Cpq;
+                    re[p] -= Kpq * ue[q] + Cpq * ve[q];
+                }
             }
+        }
+
+        for (uint m=0;m<rElement.size();m++)
+        {
+            uint nodeID = rElement.getNodeId(m);
+            buffer.f[3*nodeID+0] += fe[3*m+0];
+            buffer.f[3*nodeID+1] += fe[3*m+1];
+            buffer.f[3*nodeID+2] += fe[3*m+2];
         }
     }
     else if (this->problemType == R_PROBLEM_STRESS_MODAL)
@@ -2097,12 +2737,18 @@ void RSolverStress::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRM
     }
     else
     {
+        // Static analysis, or a quasi-static sequence of static solutions.
         Ae = Ke;
         be = fe;
     }
     this->applyLocalRotations(elementID,Ae);
     this->applyLocalRotations(elementID,Be);
     this->applyLocalRotations(elementID,be);
+    if (this->computeInitialAcceleration)
+    {
+        this->applyLocalRotations(elementID,De);
+        this->applyLocalRotations(elementID,re);
+    }
 
     // Apply explicit boundary conditions. Ae and be are in the frame of each
     // node by now, so the prescribed values have to be taken in that same
@@ -2125,7 +2771,7 @@ void RSolverStress::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRM
                 {
                     continue;
                 }
-                for (uint n=0;n<3*rElement.size();n++)
+                for (uint n=0;n<ne;n++)
                 {
                     be[n] -= Ae[n][3*m+c] * u;
                 }
@@ -2135,6 +2781,7 @@ void RSolverStress::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRM
 
     // Assembly final matrix system
     uint dims = 3;
+    const bool assembleMass = (this->problemType == R_PROBLEM_STRESS_MODAL || this->computeInitialAcceleration);
     for (uint m=0;m<rElement.size();m++)
     {
         for (uint i=0;i<dims;i++)
@@ -2143,7 +2790,11 @@ void RSolverStress::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRM
 
             if (this->nodeBook.getValue(dims*rElement.getNodeId(m)+i,mp))
             {
-                bp[mp] += be[dims*m+i];
+                buffer.b[mp] += be[dims*m+i];
+                if (this->computeInitialAcceleration)
+                {
+                    buffer.r[mp] += re[dims*m+i];
+                }
 
                 for (uint n=0;n<rElement.size();n++)
                 {
@@ -2153,11 +2804,15 @@ void RSolverStress::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRM
 
                         if (this->nodeBook.getValue(dims*rElement.getNodeId(n)+j,np))
                         {
-                            Ap.addValue(mp,np,Ae[dims*m+i][dims*n+j]);
-                            if (this->problemType == R_PROBLEM_STRESS_MODAL)
+                            buffer.A.addValue(mp,np,Ae[dims*m+i][dims*n+j]);
+                            if (assembleMass)
                             {
                                 // Be carries the mass in the node frames.
-                                Mp.addValue(mp,np,Be[dims*m+i][dims*n+j]);
+                                buffer.M.addValue(mp,np,Be[dims*m+i][dims*n+j]);
+                            }
+                            if (this->computeInitialAcceleration)
+                            {
+                                buffer.D.addValue(mp,np,De[dims*m+i][dims*n+j]);
                             }
                         }
                     }

@@ -272,6 +272,42 @@ unaffected.
   restrains and the reaction is only along it, that constraints from two
   entities combine on a shared node with their prescribed values, and that
   contradicting constraints are reported
+- **RSolverStress** transient analysis is now true elastodynamics,
+  `M*u'' + C*u' + K*u = f(t)`, replacing the first order march
+  `M*u' + K*u = f`, which only relaxed towards the static answer:
+  - **Newmark** time integration with the **Hilber-Hughes-Taylor** modification
+    (`RStressSetup::hhtAlpha`, `-1/3` to `0`). With alpha zero, gamma is `1/2`
+    and beta is half the time-march approximation coefficient, clamped to `1/4`
+    as in the acoustic solver. A negative alpha sets `gamma = 1/2 - alpha` and
+    `beta = (1 - alpha)^2 / 4`, damping high frequencies. The load of the
+    previous step is kept for the `-alpha*f(n)` term; on the first step and
+    after a restart the load is taken as constant over the step
+  - **Rayleigh damping** `C = alpha_M*M + beta_K*K` from the new optional
+    *Rayleigh mass* and *Rayleigh stiffness damping* material properties
+  - the **initial acceleration** is solved from `M*a = f - K*u - C*v` on the
+    first step; directions without mass get zero
+  - optional **lumped mass** (`RStressSetup::lumpedMass`), by HRZ diagonal
+    scaling, which stays positive for quadratic elements
+  - *Displacement* and the new *Structural velocity* initial conditions are
+    applied on the first run (the displacement condition was offered but never
+    read before); constrained directions keep no initial velocity
+  - new *Structural velocity* and *Structural acceleration* node results. They
+    carry the Newmark state to the next step and over a restart. They are
+    separate from the fluid *Velocity* so a fluid-structure task flow does not
+    mix them
+  - the state at the beginning of a time step is kept when a task group runs
+    the solver several times within that step
+  - **quasi-static** transient type (`R_STRESS_TRANSIENT_QUASI_STATIC`) solves
+    `K*u = f(t)` at every step, neglecting inertia
+- **RScales** scale factors for the Rayleigh coefficients and the structural
+  velocity and acceleration
+- **tst_solver_stress** checks a suddenly loaded fixed-free bar against the
+  wave solution: twice the static deflection at `t = 2L/c` and zero at
+  `t = 4L/c`, with Newmark, HHT and lumped mass. It also checks that Rayleigh
+  damping settles the bar to the static deflection, that a quasi-static run
+  equals the static solution, that an initial velocity moves the free end with
+  that velocity until the wave from the root arrives, and that the velocity and
+  acceleration results are stored
 
 #### Contaminant dispersion
 
@@ -432,6 +468,48 @@ unaffected.
 
 #### Stress and modal analysis
 
+- **RSolverGeneric::findComputableElements()** required every material
+  property registered for the problem type, optional ones included. An element
+  without an optional property was left unsolved unless a boundary condition
+  on its group made it computable. It now requires only
+  **RMaterialProperty::getRequiredTypes()**. This also affected acoustics,
+  where the optional *Acoustic damping factor* and the alternative *Speed of
+  sound* / *Modulus of elasticity* were all required
+- **RSolverStress** surface elements:
+  - the element to global rotation used the 3n x 2n matrix of
+    **RElement::findJacobian()**, which holds the element frame in every node
+    block, so `Rt*K*Rt^T` added up the couplings of all node pairs and the
+    surface stiffness and mass were rank deficient. The block diagonal part is
+    now used
+  - the stiffness was overwritten at each integration point instead of
+    accumulated, so only the last point counted. The local mass was accumulated
+    across points and added again at each one. Both are now summed once per
+    point, which matters for quadrilaterals
+  - the stiffness did not carry the surface thickness, unlike the mass, the self
+    weight and the thermal load
+  - the same stiffness, used for the nodal forces in **process()**, had the
+    same defects
+- **RSolverStress::store()** set the *Force* display range on the
+  *Displacement* variable
+- **RSolverStress** thermal stress:
+  - the thermal stress of volume and surface elements was subtracted as
+    `sum_m B_m^T * D * alpha*dT`, which vanishes because the shape function
+    derivatives sum to zero, so the reported stress was `D*B*u` alone - a
+    freely expanding body showed `E*alpha*dT` of stress, a clamped one none. It
+    is now `D*(B*u - eps_th)`; surfaces had the thermal stress multiplied by
+    the thickness as well
+  - the surface thermal load used a thermal shear strain and the plain
+    `alpha*dT`. In plane strain the thermal strain is `(1+v)*alpha*dT` in both
+    in-plane directions and no shear
+  - nodal forces of volumes, surfaces and lines were `K*u`; they are now the
+    internal elastic force `K*u - f_th`, so the reaction of a thermally loaded
+    body balances and a free one shows none
+- **tst_solver_stress** checks a heated bar free to expand (`alpha*dT*L`, no
+  axial stress, `-E*alpha*dT` laterally, no reaction), a heated clamped bar
+  (`-E*alpha*dT` in every direction, reaction `E*alpha*dT*A`), a heated plane
+  strain strip (`(1+v)/(1-v)*alpha*dT*L`) and a heated truss
+- **tst_solver_stress** checks a strip of quadrilaterals against `F*L/(E*t*w)`
+  and its axial modes against `c/(4*L)`
 - **RSolverStress**:
   - von Mises was `QN + QS` instead of `sqrt(QN^2 + QS^2)` (up to about 41 %
     too high); the 2D shear invariant of surface elements kept the shear sign

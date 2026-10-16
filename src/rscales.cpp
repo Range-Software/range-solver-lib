@@ -175,6 +175,18 @@ double RScales::findScaleFactor(RVariableType variableType) const
             return std::pow(this->metre,2)/std::pow(this->second,2);
         case R_VARIABLE_POTENTIAL_ACCELERATION:
             return std::pow(this->metre,2)/std::pow(this->second,3);
+        // Rayleigh damping C = alpha*M + beta*K.
+        case R_VARIABLE_RAYLEIGH_MASS_DAMPING:
+            return 1.0/this->second;
+        case R_VARIABLE_RAYLEIGH_STIFFNESS_DAMPING:
+            return this->second;
+        case R_VARIABLE_STRUCTURAL_ACCELERATION:
+            return this->metre/std::pow(this->second,2);
+        case R_VARIABLE_STRUCTURAL_VELOCITY:
+        case R_VARIABLE_STRUCTURAL_VELOCITY_X:
+        case R_VARIABLE_STRUCTURAL_VELOCITY_Y:
+        case R_VARIABLE_STRUCTURAL_VELOCITY_Z:
+            return this->metre/this->second;
         case R_VARIABLE_PRESSURE:
         case R_VARIABLE_MODULUS_OF_ELASTICITY:
         case R_VARIABLE_STRESS:

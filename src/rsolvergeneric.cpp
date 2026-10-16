@@ -988,13 +988,9 @@ void RSolverGeneric::findComputableElements(RProblemType problemType)
 
     if (needsMaterial)
     {
-        for (uint i=0;i<RMaterialProperty::nTypes;i++)
-        {
-            if (problemType & RMaterialProperty::getProblemTypeMask(RMaterialProperty::Type(i)))
-            {
-                propList.push_back(RMaterialProperty::Type(i));
-            }
-        }
+        // Optional properties (damping, alternative acoustic inputs) must not
+        // make an element without them non-computable.
+        propList = RMaterialProperty::getRequiredTypes(problemType);
     }
     for (uint i=0;i<this->pModel->getNElementGroups();i++)
     {

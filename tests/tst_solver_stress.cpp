@@ -290,6 +290,104 @@ RModel buildTruss(double tipForce)
 //! entered direction points along y, which restrains nothing that is not
 //! already zero. The two cases give opposite answers, which is what makes this
 //! a usable check of whether the entered direction is honoured.
+//! The same bar as a thin strip of four node quadrilaterals in the XY plane,
+//! barSide wide and stripThickness thick. Quadrilaterals have several
+//! integration points, so the element matrices must be accumulated over them.
+constexpr double stripThickness = 0.01; // [m]
+
+RModel buildStrip(double tipForce)
+{
+    RModel model;
+
+    model.setNNodes(2*(nSlices+1));
+    for (uint i=0;i<=nSlices;i++)
+    {
+        double x = barLength * double(i) / double(nSlices);
+        model.getNode(2*i+0).set(x,0.0,0.0);
+        model.getNode(2*i+1).set(x,barSide,0.0);
+    }
+
+    for (uint i=0;i<nSlices;i++)
+    {
+        RElement element(R_ELEMENT_QUAD1);
+        element.setNodeId(0,2*i+0);
+        element.setNodeId(1,2*(i+1)+0);
+        element.setNodeId(2,2*(i+1)+1);
+        element.setNodeId(3,2*i+1);
+        model.addElement(element,true,0);
+    }
+
+    RMaterial material(RMaterial::Solid);
+    material.setName("Steel");
+
+    RMaterialProperty modulusProperty(RMaterialProperty::ModulusOfElasiticity);
+    modulusProperty.add(293.15,elasticityModulus);
+    material.add(modulusProperty);
+
+    RMaterialProperty poissonProperty(RMaterialProperty::PoissonRatio);
+    poissonProperty.add(293.15,poissonRatio);
+    material.add(poissonProperty);
+
+    RMaterialProperty densityProperty(RMaterialProperty::Density);
+    densityProperty.add(293.15,density);
+    material.add(densityProperty);
+
+    RMaterialProperty expansionProperty(RMaterialProperty::ThermalExpansionCoefficient);
+    expansionProperty.add(293.15,thermalExpansion);
+    material.add(expansionProperty);
+
+    RSurface &surface = model.getSurface(0);
+    surface.setName("Strip");
+    surface.setThickness(stripThickness);
+    surface.setMaterial(material);
+
+    // Only the axial direction is free, which leaves the axial modes alone.
+    RBoundaryCondition lateralBc(R_BOUNDARY_CONDITION_DISPLACEMENT);
+    lateralBc.getComponent(lateralBc.findComponentPosition(R_VARIABLE_DISPLACEMENT_X)).setEnabled(false);
+    lateralBc.getComponent(lateralBc.findComponentPosition(R_VARIABLE_DISPLACEMENT_Y)).add(0.0,0.0);
+    lateralBc.getComponent(lateralBc.findComponentPosition(R_VARIABLE_DISPLACEMENT_Z)).add(0.0,0.0);
+    surface.addBoundaryCondition(lateralBc);
+
+    for (uint j=0;j<2;j++)
+    {
+        RElement element(R_ELEMENT_POINT);
+        element.setNodeId(0,j);
+        model.addElement(element,true,0);
+    }
+
+    RPoint &fixedPoint = model.getPoint(0);
+    fixedPoint.setName("Fixed end");
+    fixedPoint.setVolume(0.0);
+
+    RBoundaryCondition fixedBc(R_BOUNDARY_CONDITION_DISPLACEMENT);
+    fixedBc.getComponent(fixedBc.findComponentPosition(R_VARIABLE_DISPLACEMENT_X)).add(0.0,0.0);
+    fixedBc.getComponent(fixedBc.findComponentPosition(R_VARIABLE_DISPLACEMENT_Y)).add(0.0,0.0);
+    fixedBc.getComponent(fixedBc.findComponentPosition(R_VARIABLE_DISPLACEMENT_Z)).add(0.0,0.0);
+    fixedPoint.addBoundaryCondition(fixedBc);
+
+    for (uint j=0;j<2;j++)
+    {
+        RElement element(R_ELEMENT_POINT);
+        element.setNodeId(0,2*nSlices+j);
+        model.addElement(element,true,1);
+    }
+
+    RPoint &loadedPoint = model.getPoint(1);
+    loadedPoint.setName("Free end");
+    loadedPoint.setVolume(0.0);
+
+    if (tipForce != 0.0)
+    {
+        RBoundaryCondition forceBc(R_BOUNDARY_CONDITION_FORCE);
+        forceBc.getComponent(forceBc.findComponentPosition(R_VARIABLE_FORCE_X)).add(0.0,tipForce);
+        forceBc.getComponent(forceBc.findComponentPosition(R_VARIABLE_FORCE_Y)).add(0.0,0.0);
+        forceBc.getComponent(forceBc.findComponentPosition(R_VARIABLE_FORCE_Z)).add(0.0,0.0);
+        loadedPoint.addBoundaryCondition(forceBc);
+    }
+
+    return model;
+}
+
 RModel buildBarWithRoller(double tipForce, bool useEnteredDirection, bool atRoot, const RR3Vector &direction, bool lateralRestraint)
 {
     RModel model = buildBar(tipForce,lateralRestraint);
@@ -443,7 +541,472 @@ private slots:
     void reactionsBalanceGravityWithTiltedRoller();
     void prescribedDisplacementIsAppliedInLocalFrame();
     void contradictingConstraintsAreReported();
+    void dynamicBarUnderSuddenLoad_data();
+    void dynamicBarUnderSuddenLoad();
+    void dampedBarSettlesToStatic();
+    void quasiStaticTransientIsStatic();
+    void initialVelocityMovesFreeEnd();
+    void dynamicResultsAreStored();
+    void staticStripScalesWithThickness();
+    void modalStripAxialFrequency();
+    void heatedBarExpandsFreely();
+    void heatedClampedBarIsCompressed();
+    void heatedStripExpandsInPlaneStrain();
+    void heatedTrussExpandsFreely();
 };
+
+namespace
+{
+
+constexpr double heatedExpansion = 1.2e-5; // [1/K]
+constexpr double heatedTemperatureRise = 100.0; // [K]
+
+//! Give the entity a thermally expanding steel and heat it by
+//! heatedTemperatureRise above its stress-free reference temperature. Without
+//! a heat solver the body sits at the initial temperature of the variable.
+void heatEntity(RElementGroup &group, double poisson)
+{
+    RMaterial material(RMaterial::Solid);
+    material.setName("Steel");
+
+    RMaterialProperty modulusProperty(RMaterialProperty::ModulusOfElasiticity);
+    modulusProperty.add(293.15,elasticityModulus);
+    material.add(modulusProperty);
+
+    RMaterialProperty poissonProperty(RMaterialProperty::PoissonRatio);
+    poissonProperty.add(293.15,poisson);
+    material.add(poissonProperty);
+
+    RMaterialProperty densityProperty(RMaterialProperty::Density);
+    densityProperty.add(293.15,density);
+    material.add(densityProperty);
+
+    RMaterialProperty expansionProperty(RMaterialProperty::ThermalExpansionCoefficient);
+    expansionProperty.add(293.15,heatedExpansion);
+    material.add(expansionProperty);
+
+    group.setMaterial(material);
+
+    REnvironmentCondition referenceTemperature(R_ENVIRONMENT_CONDITION_TEMPERATURE);
+    referenceTemperature.getComponent(referenceTemperature.findComponentPosition(R_VARIABLE_TEMPERATURE))
+            .add(0.0,RVariable::getInitValue(R_VARIABLE_TEMPERATURE)-heatedTemperatureRise);
+    group.addEnvironmentCondition(referenceTemperature);
+}
+
+//! Sum of the axial nodal force over the fixed end nodes.
+double rootAxialForce(const RModel &model, const std::vector<uint> &rootNodes)
+{
+    double f = 0.0;
+    for (uint node : rootNodes)
+    {
+        f += nodeValue(model,R_VARIABLE_FORCE,0,node);
+    }
+    return f;
+}
+
+}
+
+//! A bar held laterally but free to grow axially. It lengthens by
+//! alpha*dT*L without axial stress, the lateral restraint carries -E*alpha*dT
+//! (zero Poisson ratio), and the fixed end takes no axial reaction.
+void TestSolverStress::heatedBarExpandsFreely()
+{
+    RModel model = buildBar(0.0);
+    model.setProblemTaskTree(RProblemTaskItem(R_PROBLEM_STRESS));
+    heatEntity(model.getVolume(0),0.0);
+
+    QString solverError;
+    QVERIFY2(runSolver(model,solverError),qPrintable(solverError));
+
+    const double thermalStress = elasticityModulus * heatedExpansion * heatedTemperatureRise;
+
+    double expected = heatedExpansion * heatedTemperatureRise * barLength;
+    double tip = 0.0;
+    for (uint j=0;j<2;j++)
+    {
+        for (uint k=0;k<2;k++)
+        {
+            tip += 0.25 * nodeValue(model,R_VARIABLE_DISPLACEMENT,0,nodeId(nSlices,j,k));
+        }
+    }
+    QVERIFY2(std::fabs(tip-expected) < 0.01*expected,
+             qPrintable(QString("Tip displacement = %1 m, expected %2 m").arg(tip).arg(expected)));
+
+    for (uint i=0;i<model.getNVolumes();i++)
+    {
+        const RVolume &volume = model.getVolume(i);
+        for (uint j=0;j<volume.size();j++)
+        {
+            uint e = volume.get(j);
+            double sxx = elementValue(model,R_VARIABLE_STRESS_X,e);
+            double syy = elementValue(model,R_VARIABLE_STRESS_Y,e);
+            double szz = elementValue(model,R_VARIABLE_STRESS_Z,e);
+            QVERIFY2(std::fabs(sxx) < 0.01*thermalStress,
+                     qPrintable(QString("Element %1: axial stress = %2 Pa, expected 0 Pa").arg(e).arg(sxx)));
+            QVERIFY2(std::fabs(syy+thermalStress) < 0.01*thermalStress && std::fabs(szz+thermalStress) < 0.01*thermalStress,
+                     qPrintable(QString("Element %1: lateral stress = (%2, %3) Pa, expected %4 Pa").arg(e).arg(syy).arg(szz).arg(-thermalStress)));
+        }
+    }
+
+    double reaction = rootAxialForce(model,{nodeId(0,0,0),nodeId(0,0,1),nodeId(0,1,0),nodeId(0,1,1)});
+    double freeForce = thermalStress * barArea;
+    QVERIFY2(std::fabs(reaction) < 0.01*freeForce,
+             qPrintable(QString("Axial reaction = %1 N, expected 0 N").arg(reaction)));
+}
+
+//! The same bar held axially at both ends does not move and carries the full
+//! thermal stress -E*alpha*dT in every direction, balanced by the reactions.
+void TestSolverStress::heatedClampedBarIsCompressed()
+{
+    RModel model = buildBar(0.0);
+    model.setProblemTaskTree(RProblemTaskItem(R_PROBLEM_STRESS));
+    heatEntity(model.getVolume(0),0.0);
+
+    RBoundaryCondition axialBc(R_BOUNDARY_CONDITION_DISPLACEMENT);
+    axialBc.getComponent(axialBc.findComponentPosition(R_VARIABLE_DISPLACEMENT_X)).add(0.0,0.0);
+    axialBc.getComponent(axialBc.findComponentPosition(R_VARIABLE_DISPLACEMENT_Y)).add(0.0,0.0);
+    axialBc.getComponent(axialBc.findComponentPosition(R_VARIABLE_DISPLACEMENT_Z)).add(0.0,0.0);
+    model.getPoint(1).addBoundaryCondition(axialBc);
+
+    QString solverError;
+    QVERIFY2(runSolver(model,solverError),qPrintable(solverError));
+
+    const double thermalStress = elasticityModulus * heatedExpansion * heatedTemperatureRise;
+
+    const RVolume &volume = model.getVolume(0);
+    for (uint j=0;j<volume.size();j++)
+    {
+        uint e = volume.get(j);
+        for (RVariableType type : {R_VARIABLE_STRESS_X,R_VARIABLE_STRESS_Y,R_VARIABLE_STRESS_Z})
+        {
+            double s = elementValue(model,type,e);
+            QVERIFY2(std::fabs(s+thermalStress) < 0.01*thermalStress,
+                     qPrintable(QString("Element %1: stress = %2 Pa, expected %3 Pa").arg(e).arg(s).arg(-thermalStress)));
+        }
+    }
+
+    // The support pushes the bar back with E*alpha*dT*A at each end.
+    double reaction = rootAxialForce(model,{nodeId(0,0,0),nodeId(0,0,1),nodeId(0,1,0),nodeId(0,1,1)});
+    double expectedReaction = thermalStress * barArea;
+    QVERIFY2(std::fabs(reaction-expectedReaction) < 0.01*std::fabs(expectedReaction),
+             qPrintable(QString("Axial reaction = %1 N, expected %2 N").arg(reaction).arg(expectedReaction)));
+}
+
+//! A strip of surface elements is plane strain. Held across its width and
+//! free along its length it grows by (1+v)/(1-v)*alpha*dT*L with no axial
+//! stress - with a non-zero Poisson ratio this checks the plane strain thermal
+//! strain (1+v)*alpha*dT.
+void TestSolverStress::heatedStripExpandsInPlaneStrain()
+{
+    const double poisson = 0.3;
+
+    RModel model = buildStrip(0.0);
+    model.setProblemTaskTree(RProblemTaskItem(R_PROBLEM_STRESS));
+    heatEntity(model.getSurface(0),poisson);
+
+    QString solverError;
+    QVERIFY2(runSolver(model,solverError),qPrintable(solverError));
+
+    double expected = (1.0 + poisson) / (1.0 - poisson) * heatedExpansion * heatedTemperatureRise * barLength;
+    for (uint j=0;j<2;j++)
+    {
+        double tip = nodeValue(model,R_VARIABLE_DISPLACEMENT,0,2*nSlices+j);
+        QVERIFY2(std::fabs(tip-expected) < 0.01*expected,
+                 qPrintable(QString("Tip displacement = %1 m, expected %2 m").arg(tip).arg(expected)));
+    }
+
+    const double thermalStress = elasticityModulus * heatedExpansion * heatedTemperatureRise;
+    const RSurface &surface = model.getSurface(0);
+    for (uint j=0;j<surface.size();j++)
+    {
+        uint e = surface.get(j);
+        double sxx = elementValue(model,R_VARIABLE_STRESS_X,e);
+        QVERIFY2(std::fabs(sxx) < 0.01*thermalStress,
+                 qPrintable(QString("Element %1: axial stress = %2 Pa, expected 0 Pa").arg(e).arg(sxx)));
+    }
+
+    double reaction = rootAxialForce(model,{0,1});
+    QVERIFY2(std::fabs(reaction) < 0.01*thermalStress*barSide*stripThickness,
+             qPrintable(QString("Axial reaction = %1 N, expected 0 N").arg(reaction)));
+}
+
+//! A heated truss grows by alpha*dT*L, without stress and without reaction.
+void TestSolverStress::heatedTrussExpandsFreely()
+{
+    RModel model = buildTruss(0.0);
+    model.setProblemTaskTree(RProblemTaskItem(R_PROBLEM_STRESS));
+    heatEntity(model.getLine(0),0.0);
+
+    QString solverError;
+    QVERIFY2(runSolver(model,solverError),qPrintable(solverError));
+
+    double expected = heatedExpansion * heatedTemperatureRise * barLength;
+    double tip = nodeValue(model,R_VARIABLE_DISPLACEMENT,0,nSlices);
+    QVERIFY2(std::fabs(tip-expected) < 0.01*expected,
+             qPrintable(QString("Tip displacement = %1 m, expected %2 m").arg(tip).arg(expected)));
+
+    const double thermalStress = elasticityModulus * heatedExpansion * heatedTemperatureRise;
+    for (uint i=0;i<nSlices;i++)
+    {
+        double s = elementValue(model,R_VARIABLE_STRESS_NORMAL,i);
+        QVERIFY2(std::fabs(s) < 0.01*thermalStress,
+                 qPrintable(QString("Element %1: axial stress = %2 Pa, expected 0 Pa").arg(i).arg(s)));
+    }
+
+    double reaction = rootAxialForce(model,{0});
+    QVERIFY2(std::fabs(reaction) < 0.01*thermalStress*barArea,
+             qPrintable(QString("Axial reaction = %1 N, expected 0 N").arg(reaction)));
+}
+
+//! A strip of quadrilaterals under an axial tip force stretches by
+//! F*L/(E*t*w). The stiffness must carry the thickness and the contribution of
+//! every integration point. The force display range must come from the force.
+void TestSolverStress::staticStripScalesWithThickness()
+{
+    const double tipForce = 1000.0; // [N]
+
+    RModel model = buildStrip(tipForce);
+    model.setProblemTaskTree(RProblemTaskItem(R_PROBLEM_STRESS));
+
+    QString solverError;
+    QVERIFY2(runSolver(model,solverError),qPrintable(solverError));
+
+    double expectedDisplacement = tipForce * barLength / (elasticityModulus * stripThickness * barSide);
+    for (uint j=0;j<2;j++)
+    {
+        double tipDisplacement = nodeValue(model,R_VARIABLE_DISPLACEMENT,0,2*nSlices+j);
+        QVERIFY2(std::fabs(tipDisplacement-expectedDisplacement) < 0.02*expectedDisplacement,
+                 qPrintable(QString("Tip displacement = %1 m, expected %2 m").arg(tipDisplacement).arg(expectedDisplacement)));
+    }
+
+    const RVariable &force = model.getVariable(model.findVariable(R_VARIABLE_FORCE));
+    double maxForceDisplay = force.getVariableData().getMaxDisplayValue();
+    QVERIFY2(maxForceDisplay > 0.1*tipForce,
+             qPrintable(QString("Force display maximum = %1 N, expected the order of %2 N").arg(maxForceDisplay).arg(tipForce)));
+}
+
+//! The axial modes of the strip are those of the bar, c/(4*L). This checks the
+//! surface mass and stiffness together.
+void TestSolverStress::modalStripAxialFrequency()
+{
+    RModel model = buildStrip(0.0);
+    model.setProblemTaskTree(RProblemTaskItem(R_PROBLEM_STRESS_MODAL));
+
+    RModalSetup &modalSetup = model.getProblemSetup().getModalSetup();
+    modalSetup.setMethod(R_MODAL_MULTIPLE_MODES);
+    modalSetup.setNModesToExtract(3);
+    modalSetup.setNIterations(300);
+    modalSetup.setConvergenceValue(1.0e-12);
+
+    QString solverError;
+    QVERIFY2(runSolver(model,solverError),qPrintable(solverError));
+
+    double expectedFrequency = std::sqrt(elasticityModulus/density) / (4.0 * barLength);
+    double frequency = modalSetup.getFrequency();
+
+    QVERIFY2(std::fabs(frequency-expectedFrequency) < 0.02*expectedFrequency,
+             qPrintable(QString("Fundamental frequency = %1 Hz, expected %2 Hz").arg(frequency).arg(expectedFrequency)));
+}
+
+namespace
+{
+
+//! Axial wave speed of the bar.
+double barWaveSpeed()
+{
+    return std::sqrt(elasticityModulus/density);
+}
+
+//! Enable time stepping - nTimeSteps steps of size dt.
+void setTransient(RModel &model, uint nTimeSteps, double dt)
+{
+    RTimeSolver &timeSolver = model.getTimeSolver();
+    timeSolver.setEnabled(true);
+    timeSolver.setTimes(RTimeSolver::findTimesVector(nTimeSteps,0.0,dt));
+    timeSolver.setInputNTimeSteps(nTimeSteps);
+    timeSolver.setInputStartTime(0.0);
+    timeSolver.setInputTimeStepSize(dt);
+    timeSolver.setOutputFrequency(0);
+}
+
+//! Mean axial displacement of the four free end nodes.
+double tipDisplacement(const RModel &model)
+{
+    double u = 0.0;
+    for (uint j=0;j<2;j++)
+    {
+        for (uint k=0;k<2;k++)
+        {
+            u += nodeValue(model,R_VARIABLE_DISPLACEMENT,0,nodeId(nSlices,j,k));
+        }
+    }
+    return u / 4.0;
+}
+
+//! Run a suddenly loaded bar from rest until the given time.
+bool runSuddenlyLoadedBar(double endTime, uint nTimeSteps, double hhtAlpha, bool lumpedMass, double &tip, QString &solverError)
+{
+    const double tipForce = 1000.0; // [N]
+
+    RModel model = buildBar(tipForce);
+    model.setProblemTaskTree(RProblemTaskItem(R_PROBLEM_STRESS));
+    setTransient(model,nTimeSteps,endTime/double(nTimeSteps));
+
+    RStressSetup &stressSetup = model.getProblemSetup().getStressSetup();
+    stressSetup.setTransientType(R_STRESS_TRANSIENT_DYNAMIC);
+    stressSetup.setHhtAlpha(hhtAlpha);
+    stressSetup.setLumpedMass(lumpedMass);
+
+    if (!runSolver(model,solverError))
+    {
+        return false;
+    }
+    tip = tipDisplacement(model);
+    return true;
+}
+
+}
+
+//! A fixed-free bar loaded suddenly at its free end. The stress wave runs to the
+//! root and back, so the free end moves linearly to twice the static deflection
+//! at t = 2L/c and back to zero at t = 4L/c, the fundamental period.
+void TestSolverStress::dynamicBarUnderSuddenLoad_data()
+{
+    QTest::addColumn<double>("hhtAlpha");
+    QTest::addColumn<bool>("lumpedMass");
+
+    QTest::newRow("Newmark") << 0.0 << false;
+    QTest::newRow("HHT") << -0.1 << false;
+    QTest::newRow("Lumped mass") << 0.0 << true;
+}
+
+void TestSolverStress::dynamicBarUnderSuddenLoad()
+{
+    QFETCH(double,hhtAlpha);
+    QFETCH(bool,lumpedMass);
+
+    const double tipForce = 1000.0; // [N]
+    const double staticDisplacement = tipForce * barLength / (elasticityModulus * barArea);
+    const double halfPeriod = 2.0 * barLength / barWaveSpeed();
+    const uint nStepsPerHalfPeriod = 100;
+
+    QString solverError;
+    double tip = 0.0;
+
+    QVERIFY2(runSuddenlyLoadedBar(halfPeriod,nStepsPerHalfPeriod,hhtAlpha,lumpedMass,tip,solverError),qPrintable(solverError));
+    QVERIFY2(std::fabs(tip-2.0*staticDisplacement) < 0.1*staticDisplacement,
+             qPrintable(QString("Tip displacement at t = 2L/c is %1 m, expected %2 m").arg(tip).arg(2.0*staticDisplacement)));
+
+    QVERIFY2(runSuddenlyLoadedBar(2.0*halfPeriod,2*nStepsPerHalfPeriod,hhtAlpha,lumpedMass,tip,solverError),qPrintable(solverError));
+    QVERIFY2(std::fabs(tip) < 0.1*staticDisplacement,
+             qPrintable(QString("Tip displacement at t = 4L/c is %1 m, expected 0 m").arg(tip)));
+}
+
+//! Strong Rayleigh mass damping removes the vibration, so the suddenly loaded
+//! bar comes to rest at the static deflection.
+void TestSolverStress::dampedBarSettlesToStatic()
+{
+    const double tipForce = 1000.0; // [N]
+    const double staticDisplacement = tipForce * barLength / (elasticityModulus * barArea);
+    const double period = 4.0 * barLength / barWaveSpeed();
+    const double omega = 2.0 * M_PI / period;
+
+    RModel model = buildBar(tipForce);
+    model.setProblemTaskTree(RProblemTaskItem(R_PROBLEM_STRESS));
+    setTransient(model,200,10.0*period/200.0);
+
+    // Damping ratio 0.5 in the fundamental mode, more in the higher ones.
+    RMaterial material = model.getVolume(0).getMaterial();
+    RMaterialProperty dampingProperty(RMaterialProperty::RayleighMassDamping);
+    dampingProperty.add(293.15,2.0*0.5*omega);
+    material.add(dampingProperty);
+    RMaterialProperty stiffnessDampingProperty(RMaterialProperty::RayleighStiffnessDamping);
+    stiffnessDampingProperty.add(293.15,0.01/omega);
+    material.add(stiffnessDampingProperty);
+    model.getVolume(0).setMaterial(material);
+
+    QString solverError;
+    QVERIFY2(runSolver(model,solverError),qPrintable(solverError));
+
+    double tip = tipDisplacement(model);
+    QVERIFY2(std::fabs(tip-staticDisplacement) < 0.01*staticDisplacement,
+             qPrintable(QString("Tip displacement = %1 m, expected %2 m").arg(tip).arg(staticDisplacement)));
+}
+
+//! The quasi-static transient analysis neglects inertia, so every time step is
+//! the static solution for the load at that time.
+void TestSolverStress::quasiStaticTransientIsStatic()
+{
+    const double tipForce = 1000.0; // [N]
+    const double staticDisplacement = tipForce * barLength / (elasticityModulus * barArea);
+
+    RModel model = buildBar(tipForce);
+    model.setProblemTaskTree(RProblemTaskItem(R_PROBLEM_STRESS));
+    setTransient(model,3,1.0e-6);
+    model.getProblemSetup().getStressSetup().setTransientType(R_STRESS_TRANSIENT_QUASI_STATIC);
+
+    QString solverError;
+    QVERIFY2(runSolver(model,solverError),qPrintable(solverError));
+
+    double tip = tipDisplacement(model);
+    QVERIFY2(std::fabs(tip-staticDisplacement) < 0.02*staticDisplacement,
+             qPrintable(QString("Tip displacement = %1 m, expected %2 m").arg(tip).arg(staticDisplacement)));
+    QVERIFY2(model.findVariable(R_VARIABLE_STRUCTURAL_VELOCITY) == RConstants::eod,
+             "Quasi-static analysis must not produce a velocity");
+}
+
+//! An unloaded bar given a uniform initial velocity. The free end moves with
+//! that velocity until the wave from the fixed root reaches it at t = L/c.
+void TestSolverStress::initialVelocityMovesFreeEnd()
+{
+    const double initialVelocity = 0.1; // [m/s]
+    const double endTime = 0.5 * barLength / barWaveSpeed();
+
+    RModel model = buildBar(0.0);
+    model.setProblemTaskTree(RProblemTaskItem(R_PROBLEM_STRESS));
+    setTransient(model,50,endTime/50.0);
+
+    RInitialCondition velocityIc(R_INITIAL_CONDITION_STRUCTURAL_VELOCITY);
+    velocityIc.getComponent(velocityIc.findComponentPosition(R_VARIABLE_STRUCTURAL_VELOCITY_X)).add(0.0,initialVelocity);
+    velocityIc.getComponent(velocityIc.findComponentPosition(R_VARIABLE_STRUCTURAL_VELOCITY_Y)).add(0.0,0.0);
+    velocityIc.getComponent(velocityIc.findComponentPosition(R_VARIABLE_STRUCTURAL_VELOCITY_Z)).add(0.0,0.0);
+    model.getVolume(0).addInitialCondition(velocityIc);
+
+    QString solverError;
+    QVERIFY2(runSolver(model,solverError),qPrintable(solverError));
+
+    double expected = initialVelocity * endTime;
+    double tip = tipDisplacement(model);
+    QVERIFY2(std::fabs(tip-expected) < 0.05*expected,
+             qPrintable(QString("Tip displacement = %1 m, expected %2 m").arg(tip).arg(expected)));
+
+    double tipVelocity = nodeValue(model,R_VARIABLE_STRUCTURAL_VELOCITY,0,nodeId(nSlices,0,0));
+    QVERIFY2(std::fabs(tipVelocity-initialVelocity) < 0.05*initialVelocity,
+             qPrintable(QString("Tip velocity = %1 m/s, expected %2 m/s").arg(tipVelocity).arg(initialVelocity)));
+}
+
+//! Dynamic analysis stores velocity and acceleration, and the velocity of the
+//! fixed end stays zero.
+void TestSolverStress::dynamicResultsAreStored()
+{
+    const double halfPeriod = 2.0 * barLength / barWaveSpeed();
+
+    RModel model = buildBar(1000.0);
+    model.setProblemTaskTree(RProblemTaskItem(R_PROBLEM_STRESS));
+    setTransient(model,10,0.1*halfPeriod/10.0);
+
+    QString solverError;
+    QVERIFY2(runSolver(model,solverError),qPrintable(solverError));
+
+    QVERIFY(model.findVariable(R_VARIABLE_STRUCTURAL_VELOCITY) != RConstants::eod);
+    QVERIFY(model.findVariable(R_VARIABLE_STRUCTURAL_ACCELERATION) != RConstants::eod);
+
+    for (uint c=0;c<3;c++)
+    {
+        QCOMPARE(nodeValue(model,R_VARIABLE_STRUCTURAL_VELOCITY,c,nodeId(0,0,0)),0.0);
+    }
+    QVERIFY(nodeValue(model,R_VARIABLE_STRUCTURAL_VELOCITY,0,nodeId(nSlices,0,0)) > 0.0);
+}
 
 //! A fixed-free bar under an axial tip force stretches by F*L/(E*A) and carries
 //! a uniform axial stress F/A.
