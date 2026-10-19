@@ -370,6 +370,37 @@ unaffected.
   face to a face of zero concentration, both reproducing the exact linear
   profile
 
+#### Flow through porous media
+
+- **RSolverPotential** new solver for `R_PROBLEM_POTENTIAL`, which used to
+  construct no solver at all. It solves steady Darcy flow of an incompressible
+  fluid, `v = -(k/mu) * (grad(p) - rho*g)` with `div(v) = 0`, for the nodal
+  pore pressure, and recovers the element Darcy velocity. Permeability comes
+  from *Permeability to fluids*, viscosity and density from the material (those
+  of the pore fluid), gravity from the *Gravitational acceleration* environment
+  condition. Volumes, surfaces with a thickness and lines with a cross area
+  conduct flow; the gravity load of surfaces and lines uses the component of
+  `g` in their plane or direction
+- *Pressure (explicit)* fixes the pressure. *Velocity (inflow)* and
+  *Volumetric flow rate (inflow)* are applied as a natural flux
+  `int( N * v_in )` on surfaces, the flow rate spread over the area of the
+  whole entity; positive flows in. Both are flagged explicit in the boundary
+  condition table, so the solver builds its own node book in which only
+  *Pressure (explicit)* removes nodes. Faces without a condition are
+  impermeable
+- A model without *Pressure (explicit)* stops with an error instead of
+  running a singular solve
+- The system is divided by the largest element `k/mu` before the CG solve.
+  Permeabilities down to `1e-20 m^2` would otherwise put the matrix near the
+  round-off clamps of **RMatrixSolver**; the solution is unchanged
+- Stores *Pressure* (node) and *Velocity* (element); with the time solver each
+  step is a separate steady state
+- Added **tst_solver_potential**: pressure driven, inflow velocity, volumetric
+  flow rate and gravity driven flow through a column, each reproducing the
+  exact linear pressure and uniform velocity to `1e-6`; a closed column at rest
+  with the exact hydrostatic pressure and zero velocity; and the error for a
+  model without a prescribed pressure
+
 ### Bug fixes
 
 #### Fluid flow

@@ -17,6 +17,7 @@ Each physics solver derives from `RSolverGeneric` and operates on an `RModel` fr
 | `RSolverAcoustic` | Acoustic wave propagation, transient and harmonic |
 | `RSolverElectrostatics` | Electrostatic field analysis |
 | `RSolverMagnetostatics` | Magnetostatic field analysis |
+| `RSolverPotential` | Steady Darcy flow through porous media |
 | `RSolverWave` | General wave equation |
 | `RSolverMesh` | Mesh deformation / moving mesh |
 

@@ -23,6 +23,7 @@ qt_add_library(range-solver-lib
         src/rsolverheat.cpp
         src/rsolvermagnetostatics.cpp
         src/rsolvermesh.cpp
+        src/rsolverpotential.cpp
         src/rsolverradiativeheat.cpp
         src/rsolvershareddata.cpp
         src/rsolverstress.cpp
@@ -50,6 +51,7 @@ qt_add_library(range-solver-lib
         include/rsolverheat.h
         include/rsolvermagnetostatics.h
         include/rsolvermesh.h
+        include/rsolverpotential.h
         include/rsolverradiativeheat.h
         include/rsolvershareddata.h
         include/rsolverstress.h

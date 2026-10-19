@@ -11,6 +11,7 @@
 #include "rsolverfluidheat.h"
 #include "rsolverheat.h"
 #include "rsolvermesh.h"
+#include "rsolverpotential.h"
 #include "rsolverradiativeheat.h"
 #include "rsolverstress.h"
 #include "rsolverwave.h"
@@ -66,7 +67,7 @@ void RSolver::_init()
         }
         else if (problemTypes[i] == R_PROBLEM_POTENTIAL)
         {
-            // NOT IMPLEMENTED
+            this->solvers[problemTypes[i]] = new RSolverPotential(this->pModel,this->modelFileName,problemConvergenceFileName,this->sharedData);
         }
         else if (problemTypes[i] == R_PROBLEM_WAVE)
         {
