@@ -1,10 +1,12 @@
 #ifndef RSOLVER_H
 #define RSOLVER_H
 
-#include <rml_model.h>
-
-#include "rsolvergeneric.h"
 #include "rsolvershareddata.h"
+#include <rml_problem_type.h>
+#include <rml_problem_task_item.h>
+
+class RModel;
+class RSolverGeneric;
 
 class RSolver
 {

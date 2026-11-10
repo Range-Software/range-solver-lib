@@ -1,7 +1,3 @@
-#include <cmath>
-
-#include <omp.h>
-
 #include "rmatrixpreconditioner.h"
 
 void RMatrixPreconditioner::_init(const RMatrixPreconditioner *pMatrixPreconditioner)

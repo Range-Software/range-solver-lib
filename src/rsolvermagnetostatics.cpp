@@ -1,7 +1,5 @@
 #include <cmath>
 
-#include <omp.h>
-
 #include "rsolvermagnetostatics.h"
 
 namespace

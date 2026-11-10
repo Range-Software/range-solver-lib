@@ -3,8 +3,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include <omp.h>
-
 #include <rbl_utils.h>
 
 #include "rmatrixsolver.h"

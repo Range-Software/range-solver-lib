@@ -1,5 +1,3 @@
-#include <omp.h>
-
 #include <rml_mesh_generator.h>
 
 #include "rsolvermesh.h"

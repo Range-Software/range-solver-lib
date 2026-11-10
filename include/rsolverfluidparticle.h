@@ -3,7 +3,6 @@
 
 #include <rbl_stop_watch.h>
 #include <rml_element_shape_derivation.h>
-#include <rml_element_shape_function.h>
 
 #include "rmatrixmanager.h"
 #include "rsolvergeneric.h"

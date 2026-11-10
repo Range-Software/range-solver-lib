@@ -1,4 +1,4 @@
-#include <QtTest>
+#include <QTest>
 
 #include "rmatrixsolver.h"
 #include "rml_matrix_solver_conf.h"

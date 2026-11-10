@@ -1,7 +1,3 @@
-#include <QFile>
-#include <cstdio>
-#include <omp.h>
-
 #include <rbl_application_state.h>
 
 #include <rml_file_utils.h>

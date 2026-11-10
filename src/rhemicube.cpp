@@ -1,5 +1,3 @@
-#include <omp.h>
-
 #include <rbl_progress.h>
 
 #include "rhemicube.h"

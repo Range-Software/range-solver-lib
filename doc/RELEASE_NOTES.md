@@ -1,3 +1,16 @@
+## Version 1.2.1
+
+### Improvements
+
+#### Includes
+
+- `rsolver.h` forward declares `RModel` and `RSolverGeneric` instead of including
+  their headers, and unused includes are removed from `rsolverfluidparticle.h` and
+  source files. Tests include `<QTest>` instead of the larger `<QtTest>`. Code that
+  received these headers through this library has to include them directly
+
+---
+
 ## Version 1.2.0
 
 ### Improvements

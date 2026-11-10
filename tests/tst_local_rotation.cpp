@@ -1,4 +1,4 @@
-#include <QtTest>
+#include <QTest>
 
 #include "rlocalrotation.h"
 #include "rbl_rmatrix.h"
