@@ -1,6 +1,9 @@
 #ifndef RSOLVERSTRESS_H
 #define RSOLVERSTRESS_H
 
+#include <vector>
+
+#include <rbl_r3vector.h>
 #include <rbl_rvector.h>
 
 #include "rsolvergeneric.h"
@@ -27,6 +30,16 @@ class RSolverStress : public RSolverGeneric
             RRVector f;
         };
 
+        //! One direction in which a support (an entity carrying a displacement
+        //! boundary condition) holds a node, in global coordinates.
+        struct NodeSupportDirection
+        {
+            //! Element group which provides the support.
+            uint elementGroupId;
+            //! Held direction of unit length.
+            RR3Vector direction;
+        };
+
         //! Element modulus of elasticity vector.
         RRVector elementElasticityModulus;
         //! Element Poisson ratio.
@@ -48,6 +61,9 @@ class RSolverStress : public RSolverGeneric
         //! node - the local frame where one is active, global otherwise. Only
         //! the first nodeConstrainedDirections components carry a meaning.
         RRMatrix nodePrescribedDisplacement;
+        //! Directions in which each support holds each node. Used to split the
+        //! reaction of a node shared by several supports among them.
+        std::vector<std::vector<NodeSupportDirection> > nodeSupportDirections;
         //! Node displacement vector.
         RSolverCartesianVector<RRVector> nodeDisplacement;
         //! Node initial displacement vector.
@@ -62,7 +78,8 @@ class RSolverStress : public RSolverGeneric
         RSolverCartesianVector<RRVector> nodeVelocityOld;
         //! Node acceleration at the beginning of the time step.
         RSolverCartesianVector<RRVector> nodeAccelerationOld;
-        //! Node load of the current time step in global frame.
+        //! Node load of the current time step in global frame, thermal
+        //! expansion load included.
         RSolverCartesianVector<RRVector> nodeLoad;
         //! Node load of the previous time step in global frame.
         RSolverCartesianVector<RRVector> nodeLoadOld;
@@ -72,6 +89,8 @@ class RSolverStress : public RSolverGeneric
         uint oldStateTimeStep;
         //! Node force vector.
         RSolverCartesianVector<RRVector> nodeForce;
+        //! Node thermal expansion load in global frame.
+        RSolverCartesianVector<RRVector> nodeThermalLoad;
         //! Node pressure.
         RRVector nodePressure;
         //! Element stress components.
@@ -184,6 +203,14 @@ class RSolverStress : public RSolverGeneric
 
         //! Process statistics.
         void statistics() override;
+
+        //! Find the total reaction force of each support and the total applied
+        //! load and store them in the model.
+        void storeSupportReactions();
+
+        //! Print the support reactions stored in the model together with the
+        //! total applied load, so that equilibrium can be checked.
+        void printSupportReactions() const;
 
         //! Local rotations are built from the constraints themselves, see
         //! generateLocalConstraints(), so the generic geometric pass is not used.

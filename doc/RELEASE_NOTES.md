@@ -1,5 +1,21 @@
 ## Version 1.2.1
 
+### New features
+
+#### Support reaction totals
+
+- **RSolverStress** finds the total reaction force of every support (each entity
+  with a Displacement, Normal displacement or Roller boundary condition) after a
+  static or transient solution, together with the total applied load. Both are
+  stored in the model results in SI units (`RModel::getSupportReactions()`,
+  `getAppliedLoad()`), so they are saved with each result record, and printed in
+  the log so that equilibrium can be checked. Modal analysis clears them. Requires
+  range-model-lib which saves them in model files. The reaction is K*u - f, so it
+  is correct on nodes which are both loaded and held, and the thermal expansion
+  load does not show up in it. A node held by several supports splits each held
+  direction among the supports which hold it. In dynamic analysis inertia and
+  damping forces are not included
+
 ### Improvements
 
 #### Includes

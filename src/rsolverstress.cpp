@@ -186,7 +186,7 @@ void RSolverStress::prepare()
         buffers[t].b.fill(0.0);
         buffers[t].r.resize(this->r.size(),0.0);
         buffers[t].r.fill(0.0);
-        buffers[t].f.resize(this->dynamic ? 3*nn : 0,0.0);
+        buffers[t].f.resize(this->problemType != R_PROBLEM_STRESS_MODAL ? 3*nn : 0,0.0);
         buffers[t].f.fill(0.0);
     }
 
@@ -792,7 +792,7 @@ void RSolverStress::prepare()
         }
     }
 
-    if (this->dynamic)
+    if (this->problemType != R_PROBLEM_STRESS_MODAL)
     {
         this->nodeLoad.x.resize(nn,0.0);
         this->nodeLoad.y.resize(nn,0.0);
@@ -809,7 +809,10 @@ void RSolverStress::prepare()
                 this->nodeLoad.z[i] += buffers[t].f[3*i+2];
             }
         }
+    }
 
+    if (this->dynamic)
+    {
         // HHT load term -alpha*f(n). The load of the current time step enters
         // the element vectors as (1+alpha)*f(n+1). Without the load of the
         // previous step (first step, restart) the load is taken as constant
@@ -1389,6 +1392,14 @@ void RSolverStress::process()
     this->nodeForce.y.fill(0.0);
     this->nodeForce.z.fill(0.0);
 
+    this->nodeThermalLoad.x.resize(this->pModel->getNNodes());
+    this->nodeThermalLoad.y.resize(this->pModel->getNNodes());
+    this->nodeThermalLoad.z.resize(this->pModel->getNNodes());
+
+    this->nodeThermalLoad.x.fill(0.0);
+    this->nodeThermalLoad.y.fill(0.0);
+    this->nodeThermalLoad.z.fill(0.0);
+
     // Initialize stress vectors
     for (uint i=0;i<6;i++)
     {
@@ -1533,6 +1544,9 @@ void RSolverStress::process()
                         this->nodeForce.x[element.getNodeId(m)] += fe[3*m+0];
                         this->nodeForce.y[element.getNodeId(m)] += fe[3*m+1];
                         this->nodeForce.z[element.getNodeId(m)] += fe[3*m+2];
+                        this->nodeThermalLoad.x[element.getNodeId(m)] += feThermal[3*m+0];
+                        this->nodeThermalLoad.y[element.getNodeId(m)] += feThermal[3*m+1];
+                        this->nodeThermalLoad.z[element.getNodeId(m)] += feThermal[3*m+2];
                     }
                 }
 
@@ -1735,6 +1749,9 @@ void RSolverStress::process()
                         this->nodeForce.x[element.getNodeId(m)] += fe[3*m+0];
                         this->nodeForce.y[element.getNodeId(m)] += fe[3*m+1];
                         this->nodeForce.z[element.getNodeId(m)] += fe[3*m+2];
+                        this->nodeThermalLoad.x[element.getNodeId(m)] += feThermal[3*m+0];
+                        this->nodeThermalLoad.y[element.getNodeId(m)] += feThermal[3*m+1];
+                        this->nodeThermalLoad.z[element.getNodeId(m)] += feThermal[3*m+2];
                     }
                 }
 
@@ -1911,6 +1928,9 @@ void RSolverStress::process()
                         this->nodeForce.x[element.getNodeId(m)] += fe[3*m+0];
                         this->nodeForce.y[element.getNodeId(m)] += fe[3*m+1];
                         this->nodeForce.z[element.getNodeId(m)] += fe[3*m+2];
+                        this->nodeThermalLoad.x[element.getNodeId(m)] += feThermal[3*m+0];
+                        this->nodeThermalLoad.y[element.getNodeId(m)] += feThermal[3*m+1];
+                        this->nodeThermalLoad.z[element.getNodeId(m)] += feThermal[3*m+2];
                     }
                 }
 
@@ -1944,6 +1964,8 @@ void RSolverStress::store()
 {
     RLogger::info("Storing results\n");
     RLogger::indent();
+
+    this->storeSupportReactions();
 
     // Displacement
     uint displacementPos = this->pModel->findVariable(R_VARIABLE_DISPLACEMENT);
@@ -2130,7 +2152,210 @@ void RSolverStress::statistics()
     }
     this->printStats(R_VARIABLE_STRESS_VON_MISES);
     this->printStats(R_VARIABLE_FORCE);
+    if (this->problemType != R_PROBLEM_STRESS_MODAL)
+    {
+        this->printSupportReactions();
+    }
     this->processMonitoringPoints();
+}
+
+void RSolverStress::storeSupportReactions()
+{
+    // Reactions of a previous solution must not outlive it.
+    this->pModel->clearSupportReactions();
+
+    if (this->problemType == R_PROBLEM_STRESS_MODAL)
+    {
+        return;
+    }
+
+    uint nNodes = this->pModel->getNNodes();
+    if (this->nodeForce.x.size() != nNodes ||
+        this->nodeThermalLoad.x.size() != nNodes ||
+        this->nodeLoad.x.size() != nNodes ||
+        this->nodeSupportDirections.size() != nNodes ||
+        this->localRotations.size() != nNodes)
+    {
+        return;
+    }
+
+    uint nGroups = this->pModel->getNElementGroups();
+    std::vector<RR3Vector> supportReaction(nGroups,RR3Vector(0.0,0.0,0.0));
+    std::vector<bool> isSupport(nGroups,false);
+    RR3Vector totalLoad(0.0,0.0,0.0);
+
+    for (uint i=0;i<nNodes;i++)
+    {
+        // Mechanical load only - the thermal expansion load is internal and
+        // in equilibrium on its own.
+        totalLoad[0] += this->nodeLoad.x[i] - this->nodeThermalLoad.x[i];
+        totalLoad[1] += this->nodeLoad.y[i] - this->nodeThermalLoad.y[i];
+        totalLoad[2] += this->nodeLoad.z[i] - this->nodeThermalLoad.z[i];
+
+        const std::vector<NodeSupportDirection> &supportDirections = this->nodeSupportDirections[i];
+        uint nHeld = std::min(this->nodeConstrainedDirections[i],uint(3));
+        if (supportDirections.empty() || nHeld == 0)
+        {
+            continue;
+        }
+
+        // Reaction = K*u - f with f the full load, thermal one included.
+        // nodeForce holds K*u - f_thermal.
+        RR3Vector reaction(this->nodeForce.x[i] + this->nodeThermalLoad.x[i] - this->nodeLoad.x[i],
+                           this->nodeForce.y[i] + this->nodeThermalLoad.y[i] - this->nodeLoad.y[i],
+                           this->nodeForce.z[i] + this->nodeThermalLoad.z[i] - this->nodeLoad.z[i]);
+
+        // Orthonormal basis of the directions in which each support holds
+        // this node.
+        std::vector<uint> groups;
+        std::vector<std::vector<RR3Vector> > groupBases;
+        for (const NodeSupportDirection &supportDirection : supportDirections)
+        {
+            uint g = 0;
+            while (g < groups.size() && groups[g] != supportDirection.elementGroupId)
+            {
+                g++;
+            }
+            if (g == groups.size())
+            {
+                groups.push_back(supportDirection.elementGroupId);
+                groupBases.push_back(std::vector<RR3Vector>());
+            }
+
+            RR3Vector w(supportDirection.direction);
+            for (const RR3Vector &b : groupBases[g])
+            {
+                double overlap = RR3Vector::dot(w,b);
+                w[0] -= overlap*b[0];
+                w[1] -= overlap*b[1];
+                w[2] -= overlap*b[2];
+            }
+            if (w.normalize() > 1.0e-8)
+            {
+                groupBases[g].push_back(w);
+            }
+        }
+
+        // Only the held directions of the node frame carry a reaction; what is
+        // left in the free ones is the residual of the matrix solver. Each held
+        // direction is shared among the supports which hold it, in proportion
+        // to how much of it falls into the directions they hold.
+        bool isRotated = this->localRotations[i].isActive();
+        for (uint c=0;c<nHeld;c++)
+        {
+            RR3Vector axis(0.0,0.0,0.0);
+            if (isRotated)
+            {
+                const RRMatrix &R = this->localRotations[i].getR();
+                axis = RR3Vector(R[0][c],R[1][c],R[2][c]);
+            }
+            else
+            {
+                axis[c] = 1.0;
+            }
+
+            std::vector<double> weight(groups.size(),0.0);
+            double weightSum = 0.0;
+            for (uint g=0;g<groups.size();g++)
+            {
+                if (groups[g] >= nGroups)
+                {
+                    continue;
+                }
+                for (const RR3Vector &b : groupBases[g])
+                {
+                    double overlap = RR3Vector::dot(axis,b);
+                    weight[g] += overlap*overlap;
+                }
+                weightSum += weight[g];
+            }
+            if (weightSum < 1.0e-12)
+            {
+                continue;
+            }
+
+            double component = RR3Vector::dot(reaction,axis);
+            for (uint g=0;g<groups.size();g++)
+            {
+                if (weight[g] <= 0.0)
+                {
+                    continue;
+                }
+                double share = component*weight[g]/weightSum;
+                for (uint d=0;d<3;d++)
+                {
+                    supportReaction[groups[g]][d] += share*axis[d];
+                }
+                isSupport[groups[g]] = true;
+            }
+        }
+    }
+
+    if (std::find(isSupport.begin(),isSupport.end(),true) == isSupport.end())
+    {
+        return;
+    }
+
+    // The solver vectors are held in scaled units; the model keeps SI values,
+    // which the scales do not touch.
+    double forceScale = this->scales.findScaleFactor(R_VARIABLE_FORCE);
+    if (forceScale != 0.0 && forceScale != 1.0)
+    {
+        for (RR3Vector &f : supportReaction)
+        {
+            f *= 1.0/forceScale;
+        }
+        totalLoad *= 1.0/forceScale;
+    }
+
+    std::vector<RSupportReaction> supportReactions;
+    for (uint g=0;g<nGroups;g++)
+    {
+        if (!isSupport[g])
+        {
+            continue;
+        }
+        const RElementGroup *pElementGroup = this->pModel->getElementGroupPtr(g);
+        supportReactions.push_back(RSupportReaction(this->pModel->getEntityGroupType(g),
+                                                    pElementGroup ? pElementGroup->getName() : QString(),
+                                                    supportReaction[g]));
+    }
+    this->pModel->setSupportReactions(supportReactions,totalLoad);
+}
+
+void RSolverStress::printSupportReactions() const
+{
+    const std::vector<RSupportReaction> &supportReactions = this->pModel->getSupportReactions();
+    if (supportReactions.empty())
+    {
+        return;
+    }
+
+    RLogger::info("Support reactions [N]\n");
+    RLogger::indent();
+    if (this->dynamic)
+    {
+        RLogger::info("Inertia and damping forces are not included.\n");
+    }
+    RR3Vector totalReaction(0.0,0.0,0.0);
+    for (const RSupportReaction &supportReaction : supportReactions)
+    {
+        const RR3Vector &f = supportReaction.getForce();
+        RLogger::info("%s '%s': Fx = %13e, Fy = %13e, Fz = %13e, |F| = %13e\n",
+                      REntityGroup::getTypeName(supportReaction.getEntityType()).toUtf8().constData(),
+                      supportReaction.getName().toUtf8().constData(),
+                      f[0],f[1],f[2],f.length());
+        for (uint d=0;d<3;d++)
+        {
+            totalReaction[d] += f[d];
+        }
+    }
+    const RR3Vector &totalLoad = this->pModel->getAppliedLoad();
+    RLogger::info("Total reaction: Fx = %13e, Fy = %13e, Fz = %13e, |F| = %13e\n",
+                  totalReaction[0],totalReaction[1],totalReaction[2],totalReaction.length());
+    RLogger::info("Total applied load: Fx = %13e, Fy = %13e, Fz = %13e, |F| = %13e\n",
+                  totalLoad[0],totalLoad[1],totalLoad[2],totalLoad.length());
+    RLogger::unindent();
 }
 
 bool RSolverStress::isComponentEnabled(const RBoundaryCondition &bc, RVariableType variableType)
@@ -2169,6 +2394,8 @@ struct RNodeConstraint
 {
     RR3Vector direction;
     double value;
+    //! Element group which imposes the constraint.
+    uint elementGroupId = RConstants::eod;
 };
 
 //! Return the boundary condition of an entity which carries a local direction,
@@ -2197,6 +2424,7 @@ void RSolverStress::generateLocalConstraints()
     this->nodeConstrainedDirections.fill(0);
     this->nodePrescribedDisplacement.resize(nNodes,3,0.0);
     this->nodePrescribedDisplacement.fill(0.0);
+    this->nodeSupportDirections.assign(nNodes,std::vector<NodeSupportDirection>());
 
     // Directions taken from the geometry. A node lying on several entities
     // collects the average of what they give it, as before.
@@ -2466,6 +2694,35 @@ void RSolverStress::generateLocalConstraints()
                 }
             }
         }
+
+        // Everything collected above which is not tagged yet comes from this
+        // element group.
+        for (uint k=0;k<pElementGroup->size();k++)
+        {
+            const RElement &rElement = this->pModel->getElement(pElementGroup->get(k));
+            for (uint l=0;l<rElement.size();l++)
+            {
+                for (RNodeConstraint &constraint : nodeConstraints[rElement.getNodeId(l)])
+                {
+                    if (constraint.elementGroupId == RConstants::eod)
+                    {
+                        constraint.elementGroupId = i;
+                    }
+                }
+            }
+        }
+    }
+
+    // Remember which support holds each node in which direction.
+    for (uint i=0;i<nNodes;i++)
+    {
+        for (const RNodeConstraint &constraint : nodeConstraints[i])
+        {
+            NodeSupportDirection supportDirection;
+            supportDirection.elementGroupId = constraint.elementGroupId;
+            supportDirection.direction = constraint.direction;
+            this->nodeSupportDirections[i].push_back(supportDirection);
+        }
     }
 
     // Reduce the constraints of each node to an orthonormal set and build the
@@ -2720,14 +2977,6 @@ void RSolverStress::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRM
                 }
             }
         }
-
-        for (uint m=0;m<rElement.size();m++)
-        {
-            uint nodeID = rElement.getNodeId(m);
-            buffer.f[3*nodeID+0] += fe[3*m+0];
-            buffer.f[3*nodeID+1] += fe[3*m+1];
-            buffer.f[3*nodeID+2] += fe[3*m+2];
-        }
     }
     else if (this->problemType == R_PROBLEM_STRESS_MODAL)
     {
@@ -2740,6 +2989,19 @@ void RSolverStress::assemblyMatrix(uint elementID, const RRMatrix &Me, const RRM
         // Static analysis, or a quasi-static sequence of static solutions.
         Ae = Ke;
         be = fe;
+    }
+
+    // Node load in the global frame - needed for the time integration and for
+    // the support reactions.
+    if (!buffer.f.empty())
+    {
+        for (uint m=0;m<rElement.size();m++)
+        {
+            uint nodeID = rElement.getNodeId(m);
+            buffer.f[3*nodeID+0] += fe[3*m+0];
+            buffer.f[3*nodeID+1] += fe[3*m+1];
+            buffer.f[3*nodeID+2] += fe[3*m+2];
+        }
     }
     this->applyLocalRotations(elementID,Ae);
     this->applyLocalRotations(elementID,Be);

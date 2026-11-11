@@ -522,6 +522,39 @@ double elementValue(const RModel &model, RVariableType variableType, uint elemen
     return model.getVariable(position).getValue(0,elementID);
 }
 
+//! Find the support reaction stored in the model for the given entity.
+bool findSupportReaction(const RModel &model, REntityGroupType entityType, const QString &name, RR3Vector &force)
+{
+    for (const RSupportReaction &supportReaction : model.getSupportReactions())
+    {
+        if (supportReaction.getEntityType() == entityType && supportReaction.getName() == name)
+        {
+            force = supportReaction.getForce();
+            return true;
+        }
+    }
+    return false;
+}
+
+//! Sum of all support reactions stored in the model.
+RR3Vector totalSupportReaction(const RModel &model)
+{
+    RR3Vector total(0.0,0.0,0.0);
+    for (const RSupportReaction &supportReaction : model.getSupportReactions())
+    {
+        for (uint c=0;c<3;c++)
+        {
+            total[c] += supportReaction.getForce()[c];
+        }
+    }
+    return total;
+}
+
+QString forceToString(const RR3Vector &f)
+{
+    return QString("(%1, %2, %3)").arg(f[0]).arg(f[1]).arg(f[2]);
+}
+
 }
 
 class TestSolverStress : public QObject
@@ -553,6 +586,9 @@ private slots:
     void heatedClampedBarIsCompressed();
     void heatedStripExpandsInPlaneStrain();
     void heatedTrussExpandsFreely();
+    void supportReactionsBalanceTipForce();
+    void supportReactionsOfClampedHeatedBar();
+    void supportReactionsBalanceGravityWithTiltedRoller();
 };
 
 namespace
@@ -1494,6 +1530,106 @@ void TestSolverStress::contradictingConstraintsAreReported()
     QVERIFY2(!runSolver(model,solverError),"The contradicting constraints were accepted");
     QVERIFY2(solverError.contains("contradict"),
              qPrintable(QString("Unexpected error message: %1").arg(solverError)));
+}
+
+//! The fixed end of a bar pulled at its tip takes the whole axial load. The
+//! root nodes are held by the fixed end and, across the bar, by the lateral
+//! restraint of the volume; the volume does not hold X, so none of the axial
+//! reaction may be credited to it. The tip nodes are both loaded and held
+//! laterally, which must not leak the load into the reactions.
+void TestSolverStress::supportReactionsBalanceTipForce()
+{
+    const double tipForce = 1000.0; // [N]
+
+    RModel model = buildBar(tipForce);
+    model.setProblemTaskTree(RProblemTaskItem(R_PROBLEM_STRESS));
+
+    QString solverError;
+    QVERIFY2(runSolver(model,solverError),qPrintable(solverError));
+
+    RR3Vector fixed, bar;
+    QVERIFY2(findSupportReaction(model,R_ENTITY_GROUP_POINT,"Fixed end",fixed),"Reaction of point 'Fixed end' is not stored");
+    QVERIFY2(findSupportReaction(model,R_ENTITY_GROUP_VOLUME,"Bar",bar),"Reaction of volume 'Bar' is not stored");
+    RR3Vector total = totalSupportReaction(model);
+    RR3Vector load = model.getAppliedLoad();
+
+    const double tolerance = 1.0e-3*tipForce;
+
+    QVERIFY2(std::fabs(fixed[0]+tipForce) < tolerance,qPrintable("Fixed end reaction " + forceToString(fixed)));
+    QVERIFY2(std::fabs(bar[0]) < tolerance,qPrintable("Lateral restraint reaction " + forceToString(bar)));
+    // Own weight acts across the bar as well, so only the axial load is known.
+    QVERIFY2(std::fabs(load[0]-tipForce) < tolerance,qPrintable("Applied load " + forceToString(load)));
+    for (uint c=0;c<3;c++)
+    {
+        QVERIFY2(std::fabs(total[c]+load[c]) < tolerance,qPrintable("Total reaction " + forceToString(total) + " against load " + forceToString(load)));
+        QVERIFY2(std::fabs(fixed[c]+bar[c]-total[c]) < tolerance,qPrintable("Supports do not add up to the total " + forceToString(total)));
+    }
+}
+
+//! A bar clamped at both ends and heated is pushed back by both supports with
+//! E*alpha*dT*A, in opposite directions. The thermal load is internal, so it
+//! adds nothing to the axial applied load or to the axial total reaction.
+void TestSolverStress::supportReactionsOfClampedHeatedBar()
+{
+    RModel model = buildBar(0.0);
+    model.setProblemTaskTree(RProblemTaskItem(R_PROBLEM_STRESS));
+    heatEntity(model.getVolume(0),0.0);
+
+    RBoundaryCondition axialBc(R_BOUNDARY_CONDITION_DISPLACEMENT);
+    axialBc.getComponent(axialBc.findComponentPosition(R_VARIABLE_DISPLACEMENT_X)).add(0.0,0.0);
+    axialBc.getComponent(axialBc.findComponentPosition(R_VARIABLE_DISPLACEMENT_Y)).add(0.0,0.0);
+    axialBc.getComponent(axialBc.findComponentPosition(R_VARIABLE_DISPLACEMENT_Z)).add(0.0,0.0);
+    model.getPoint(1).addBoundaryCondition(axialBc);
+
+    QString solverError;
+    QVERIFY2(runSolver(model,solverError),qPrintable(solverError));
+
+    RR3Vector fixed, free;
+    QVERIFY2(findSupportReaction(model,R_ENTITY_GROUP_POINT,"Fixed end",fixed),"Reaction of point 'Fixed end' is not stored");
+    QVERIFY2(findSupportReaction(model,R_ENTITY_GROUP_POINT,"Free end",free),"Reaction of point 'Free end' is not stored");
+    RR3Vector total = totalSupportReaction(model);
+    RR3Vector load = model.getAppliedLoad();
+
+    const double expected = elasticityModulus * heatedExpansion * heatedTemperatureRise * barArea;
+    const double tolerance = 1.0e-3*expected;
+
+    QVERIFY2(std::fabs(fixed[0]-expected) < tolerance,qPrintable("Fixed end reaction " + forceToString(fixed)));
+    QVERIFY2(std::fabs(free[0]+expected) < tolerance,qPrintable("Free end reaction " + forceToString(free)));
+    QVERIFY2(std::fabs(total[0]) < tolerance,qPrintable("Total reaction " + forceToString(total)));
+    QVERIFY2(std::fabs(load[0]) < tolerance,qPrintable("Applied load " + forceToString(load)));
+}
+
+//! A cantilever under its own weight with a tilted roller at mid span. The
+//! roller holds its nodes in a rotated node frame and can only push along its
+//! direction, and together with the fixed end it carries the whole weight.
+void TestSolverStress::supportReactionsBalanceGravityWithTiltedRoller()
+{
+    RModel model = buildBarUnderGravityWithTiltedRoller();
+    model.setProblemTaskTree(RProblemTaskItem(R_PROBLEM_STRESS));
+
+    QString solverError;
+    QVERIFY2(runSolver(model,solverError),qPrintable(solverError));
+
+    RR3Vector fixed, roller;
+    QVERIFY2(findSupportReaction(model,R_ENTITY_GROUP_POINT,"Fixed end",fixed),"Reaction of point 'Fixed end' is not stored");
+    QVERIFY2(findSupportReaction(model,R_ENTITY_GROUP_SURFACE,"Mid span",roller),"Reaction of surface 'Mid span' is not stored");
+    RR3Vector total = totalSupportReaction(model);
+    RR3Vector load = model.getAppliedLoad();
+
+    const double weight = density * barArea * barLength * gravityAcceleration;
+    const double tolerance = 1.0e-3*std::fabs(weight);
+
+    QVERIFY2(std::fabs(load[2]-weight) < tolerance,qPrintable("Applied load " + forceToString(load)));
+    for (uint c=0;c<3;c++)
+    {
+        QVERIFY2(std::fabs(total[c]+load[c]) < tolerance,qPrintable("Total reaction " + forceToString(total) + " against load " + forceToString(load)));
+        QVERIFY2(std::fabs(fixed[c]+roller[c]-total[c]) < tolerance,qPrintable("Supports do not add up to the total " + forceToString(total)));
+    }
+
+    // The roller pushes along (1,1,1) only, and it does carry part of the load.
+    QVERIFY2(roller.length() > tolerance,qPrintable("Roller reaction " + forceToString(roller)));
+    QVERIFY2(std::fabs(roller[0]-roller[1]) < tolerance && std::fabs(roller[0]-roller[2]) < tolerance,
+             qPrintable("Roller reaction " + forceToString(roller) + " is not along its direction"));
 }
 
 QTEST_APPLESS_MAIN(TestSolverStress)
